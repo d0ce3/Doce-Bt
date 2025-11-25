@@ -7,6 +7,7 @@ import asyncio
 import os
 from threading import Thread
 from flask import Flask
+import time
 
 # ========== SERVIDOR HTTP PARA RENDER ==========
 app = Flask(__name__)
@@ -26,6 +27,41 @@ def run_flask():
     """Ejecutar Flask en thread separado"""
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ========== SELF-PING PARA EVITAR SLEEP ==========
+def self_ping():
+    """Hacer ping a sí mismo para evitar que Render duerma el servicio"""
+    # Esperar 2 minutos antes de empezar
+    time.sleep(120)
+    
+    # Obtener URL del servicio desde variable de entorno
+    render_url = os.getenv('RENDER_EXTERNAL_URL')
+    
+    if not render_url:
+        print("⚠️ RENDER_EXTERNAL_URL no configurada")
+        print("⚠️ Self-ping desactivado - el bot puede dormirse")
+        print("⚠️ Configura la variable en Render o usa UptimeRobot")
+        return
+    
+    health_url = f"{render_url}/health"
+    print(f"✅ Self-ping activado → {health_url}")
+    
+    while True:
+        try:
+            # Hacer ping cada 10 minutos (600 segundos)
+            # 10 min < 15 min (límite de Render)
+            time.sleep(600)
+            
+            response = requests.get(health_url, timeout=5)
+            if response.status_code == 200:
+                timestamp = datetime.now().strftime('%H:%M:%S')
+                print(f"✅ Self-ping OK [{timestamp}]")
+            else:
+                print(f"⚠️ Self-ping status: {response.status_code}")
+        except Exception as e:
+            print(f"❌ Self-ping error: {e}")
+            # Continuar intentando aunque falle
+            time.sleep(60)
 
 # ========== CONFIGURACIÓN DEL BOT ==========
 intents = discord.Intents.default()
@@ -652,18 +688,52 @@ if __name__ == "__main__":
     
     if not TOKEN:
         print("❌ Error: No se encontró DISCORD_BOT_TOKEN")
-        print("Configura la variable de entorno o agrégala aquí:")
-        TOKEN = input("Token del bot: ").strip()
+        exit(1)
     
     # Iniciar servidor HTTP en background para Render
-    print("🌐 Iniciando servidor HTTP...")
+    print("🌐 Iniciando servidor HTTP para Render...")
     Thread(target=run_flask, daemon=True).start()
+    
+    # Iniciar self-ping para evitar que Render duerma el servicio
+    print("⏰ Iniciando self-ping...")
+    Thread(target=self_ping, daemon=True).start()
+    
+    # Dar tiempo al servidor HTTP
+    time.sleep(2)
     
     # Iniciar bot
     print("🤖 Iniciando bot de Discord...")
+    print(f"🔑 Token: {TOKEN[:20]}...{TOKEN[-5:]}")
+    
     try:
-        bot.run(TOKEN)
+        bot.run(TOKEN, log_handler=None)
     except discord.LoginFailure:
-        print("❌ Token inválido. Verifica tu DISCORD_BOT_TOKEN")
+        print("\n" + "="*50)
+        print("❌ ERROR: Token inválido")
+        print("="*50)
+        print("Soluciones:")
+        print("1. Ve a https://discord.com/developers/applications")
+        print("2. Bot → Reset Token")
+        print("3. Copia el nuevo token")
+        print("4. Actualiza DISCORD_BOT_TOKEN en Render")
+        print("="*50)
+        exit(1)
+    except discord.PrivilegedIntentsRequired:
+        print("\n" + "="*50)
+        print("❌ ERROR: Faltan Privileged Intents")
+        print("="*50)
+        print("Soluciones:")
+        print("1. Ve a https://discord.com/developers/applications")
+        print("2. Selecciona tu bot → Bot")
+        print("3. Activa todos los Privileged Gateway Intents:")
+        print("   - Presence Intent")
+        print("   - Server Members Intent")
+        print("   - Message Content Intent")
+        print("4. Guarda y reinicia el bot en Render")
+        print("="*50)
+        exit(1)
     except Exception as e:
-        print(f"❌ Error al iniciar el bot: {e}")
+        print(f"\n❌ Error inesperado: {e}")
+        import traceback
+        traceback.print_exc()
+        exit(1)
