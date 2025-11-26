@@ -46,6 +46,7 @@ async def load_cogs():
         "cogs.setup_cog",
         "cogs.permisos",
         "cogs.codespace_control",
+        "cogs.codespace_minecraft",
         "cogs.info",
     ]
 
@@ -64,40 +65,27 @@ async def on_ready():
     print(f"📊 Conectado a {len(bot.guilds)} servidores")
     
     try:
+        # 🔥 SINCRONIZACIÓN HÍBRIDA: Guild específico + Global
+        
+        # 1. Sincronizar en servidor de pruebas (instantáneo)
         if GUILD_ID:
-            # Usar el guild real, no discord.Object
             guild = discord.utils.get(bot.guilds, id=GUILD_ID)
             
-            if not guild:
-                print(f"❌ No se encontró el servidor con ID {GUILD_ID}")
-                print(f"Servidores disponibles: {[f'{g.name} ({g.id})' for g in bot.guilds]}")
-                return
-            
-            print(f"🎯 Sincronizando comandos en: {guild.name} (ID: {guild.id})")
-            
-            # Limpiar comandos antiguos del servidor
-            bot.tree.clear_commands(guild=guild)
-            
-            # 🔥 COPIAR comandos globales al guild específico
-            print(f"📋 Copiando {len(bot.tree.get_commands())} comandos al servidor...")
-            bot.tree.copy_global_to(guild=guild)
-            
-            # Sincronizar
-            cmds = await bot.tree.sync(guild=guild)
-            
-            print(f"✅ Comandos sincronizados exitosamente!")
-            print(f"📥 Total de comandos registrados: {len(cmds)}")
-            print(f"📝 Lista: {[c.name for c in cmds]}")
-            
-        else:
-            # Sincronización global
-            print("🌍 Sincronizando comandos globalmente...")
-            bot.tree.clear_commands(guild=None)
-            cmds = await bot.tree.sync()
-            
-            print("✅ Comandos sincronizados globalmente")
-            print(f"📥 Total de comandos: {len(cmds)}")
-            print(f"📝 Lista: {[c.name for c in cmds]}")
+            if guild:
+                print(f"🎯 Sincronizando en servidor de pruebas: {guild.name}")
+                bot.tree.clear_commands(guild=guild)
+                bot.tree.copy_global_to(guild=guild)
+                cmds_guild = await bot.tree.sync(guild=guild)
+                print(f"✅ {len(cmds_guild)} comandos en {guild.name}: {[c.name for c in cmds_guild]}")
+            else:
+                print(f"⚠️  Servidor {GUILD_ID} no encontrado")
+        
+        # 2. Sincronizar globalmente (tarda ~1 hora en propagarse)
+        print("🌍 Sincronizando comandos globalmente...")
+        cmds_global = await bot.tree.sync()
+        print(f"✅ {len(cmds_global)} comandos globales sincronizados")
+        print(f"📝 Lista: {[c.name for c in cmds_global]}")
+        print("⏱️  Propagación global: hasta 1 hora")
             
     except Exception as e:
         print(f"❌ Error sincronizando comandos: {e}")
