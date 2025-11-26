@@ -1,6 +1,8 @@
 import os
 from discord import Object
+from dotenv import load_dotenv
 
+load_dotenv()
 # Token del bot
 DISCORD_BOT_TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 
