@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands
 import asyncio
 from threading import Thread
+import traceback
 
 from config import DISCORD_BOT_TOKEN, GUILD_ID, SESIONES_FILE, PORT, RENDER_EXTERNAL_URL
 from web.server import run_flask, set_bot
@@ -39,24 +40,68 @@ def limpiar_tokens_expirados():
         safe_save(SESIONES_FILE, sesiones)
 
 
+async def load_cogs():
+    """Carga todos los cogs antes de sincronizar"""
+    cogs = [
+        "cogs.setup_cog",
+        "cogs.permisos",
+        "cogs.codespace_control",
+        "cogs.info",
+    ]
+
+    for cog in cogs:
+        try:
+            await bot.load_extension(cog)
+            print(f"✅ Cog cargado: {cog}")
+        except Exception as e:
+            print(f"❌ Error cargando {cog}: {e}")
+            traceback.print_exc()
+
+
 @bot.event
 async def on_ready():
     print(f"✅ Bot conectado como {bot.user} (ID: {bot.user.id})")
     print(f"📊 Conectado a {len(bot.guilds)} servidores")
-
-    # ⬇️ AHORA SÍ: sync cuando ya hay application_id
+    
     try:
         if GUILD_ID:
-            guild = discord.Object(id=GUILD_ID)
+            # Usar el guild real, no discord.Object
+            guild = discord.utils.get(bot.guilds, id=GUILD_ID)
+            
+            if not guild:
+                print(f"❌ No se encontró el servidor con ID {GUILD_ID}")
+                print(f"Servidores disponibles: {[f'{g.name} ({g.id})' for g in bot.guilds]}")
+                return
+            
+            print(f"🎯 Sincronizando comandos en: {guild.name} (ID: {guild.id})")
+            
+            # Limpiar comandos antiguos del servidor
+            bot.tree.clear_commands(guild=guild)
+            
+            # 🔥 COPIAR comandos globales al guild específico
+            print(f"📋 Copiando {len(bot.tree.get_commands())} comandos al servidor...")
+            bot.tree.copy_global_to(guild=guild)
+            
+            # Sincronizar
             cmds = await bot.tree.sync(guild=guild)
-            print(f"✅ Comandos sincronizados en servidor de pruebas (ID: {GUILD_ID})")
-            print(f"📥 Slash commands registrados en guild: {[c.name for c in cmds]}")
+            
+            print(f"✅ Comandos sincronizados exitosamente!")
+            print(f"📥 Total de comandos registrados: {len(cmds)}")
+            print(f"📝 Lista: {[c.name for c in cmds]}")
+            
         else:
+            # Sincronización global
+            print("🌍 Sincronizando comandos globalmente...")
+            bot.tree.clear_commands(guild=None)
             cmds = await bot.tree.sync()
+            
             print("✅ Comandos sincronizados globalmente")
-            print(f"📥 Slash commands registrados globalmente: {[c.name for c in cmds]}")
+            print(f"📥 Total de comandos: {len(cmds)}")
+            print(f"📝 Lista: {[c.name for c in cmds]}")
+            
     except Exception as e:
         print(f"❌ Error sincronizando comandos: {e}")
+        traceback.print_exc()
 
     limpiar_tokens_expirados()
     print("\n🎮 Bot listo para usar!")
@@ -102,22 +147,6 @@ async def on_app_command_error(
             )
 
 
-async def load_cogs():
-    cogs = [
-        "cogs.setup_cog",
-        "cogs.permisos",
-        "cogs.codespace_control",
-        "cogs.info",
-    ]
-
-    for cog in cogs:
-        try:
-            await bot.load_extension(cog)
-            print(f"✅ Cog cargado: {cog}")
-        except Exception as e:
-            print(f"❌ Error cargando {cog}: {e}")
-
-
 async def main():
     print("=" * 50)
     print("🚀 Iniciando doce|tools v2")
@@ -128,23 +157,23 @@ async def main():
         print("Agrega tu token en el archivo .env")
         return
 
-    # 1) Cargar COGs antes de conectar
-    await load_cogs()
-
-    # 2) Lanzar Flask + auto-ping
-    set_bot(bot)
-    Thread(target=run_flask, daemon=True).start()
-    Thread(target=self_ping, daemon=True).start()
-
-    # 3) Arrancar el bot (on_ready hará el sync)
-    try:
+    # Cargar cogs antes de iniciar el bot
+    async with bot:
+        print("\n📦 Cargando extensiones (cogs)...")
+        await load_cogs()
+        
+        print(f"\n🌳 Comandos cargados en el bot: {len(list(bot.tree.walk_commands()))}")
+        for cmd in bot.tree.walk_commands():
+            print(f"   • {cmd.name}")
+        
+        # Iniciar Flask y auto-ping
+        set_bot(bot)
+        Thread(target=run_flask, daemon=True).start()
+        Thread(target=self_ping, daemon=True).start()
+        
+        print("\n🔌 Conectando a Discord...")
+        # Iniciar el bot (on_ready hará el sync)
         await bot.start(DISCORD_BOT_TOKEN)
-    except KeyboardInterrupt:
-        print("\n⚠️ Bot detenido manualmente")
-    except Exception as e:
-        print(f"\n❌ Error fatal: {e}")
-    finally:
-        await bot.close()
 
 
 if __name__ == "__main__":
@@ -152,3 +181,6 @@ if __name__ == "__main__":
         asyncio.run(main())
     except KeyboardInterrupt:
         print("\n👋 Adiós!")
+    except Exception as e:
+        print(f"\n❌ Error fatal: {e}")
+        traceback.print_exc()
