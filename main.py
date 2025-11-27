@@ -56,6 +56,8 @@ async def load_cogs():
             print(f"✅ Cog cargado: {cog}")
         except Exception as e:
             print(f"❌ Error cargando {cog}: {e}")
+            import traceback
+            traceback.print_exc()
             traceback.print_exc()
 
 
