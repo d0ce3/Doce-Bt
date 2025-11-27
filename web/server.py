@@ -10,9 +10,13 @@ def set_bot(bot):
     global bot_instance
     bot_instance = bot
 
+def get_bot():
+    """Obtiene la instancia del bot"""
+    return bot_instance
+
 @app.route('/')
 def home():
-    return "✅ doce|tools v2 activo", 200
+    return "✅ d0ce3|tools activo", 200
 
 @app.route('/health')
 def health():
@@ -24,6 +28,16 @@ def health():
         }, 200
     else:
         return {"status": "starting"}, 503
+
+# Importar y registrar webhooks
+try:
+    from web.webhook_handler import registrar_webhooks
+    registrar_webhooks(app, get_bot)
+    print("✅ Webhooks registrados correctamente")
+except ImportError as e:
+    print(f"⚠️  No se pudo importar webhook_handler: {e}")
+except Exception as e:
+    print(f"⚠️  Error registrando webhooks: {e}")
 
 def run_flask():
     """Ejecuta el servidor Flask"""
