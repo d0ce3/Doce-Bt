@@ -5,6 +5,7 @@ import asyncio
 import aiohttp
 from datetime import datetime
 from typing import Optional
+import os
 
 from utils.permissions import obtener_contexto_usuario, sesion_valida
 from utils.github_api import iniciar_codespace, estado_codespace
@@ -96,19 +97,78 @@ class CodespaceMinecraftCog(commands.Cog):
             print(f"Error verificando servidor {ip}: {e}")
             return False
 
+    async def llamar_webhook_minecraft(self, codespace_url: str, auth_token: str) -> dict:
+        """
+        Llama al webhook del Codespace para iniciar Minecraft
+        
+        Args:
+            codespace_url: URL base del Codespace (ej: https://name-8080.app.github.dev)
+            auth_token: Token de autenticación para el webhook
+        
+        Returns:
+            dict: Respuesta del webhook
+        """
+        try:
+            url = f"{codespace_url}/minecraft/start"
+            headers = {
+                "Authorization": f"Bearer {auth_token}",
+                "Content-Type": "application/json"
+            }
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.post(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=30)
+                ) as resp:
+                    if resp.status in [200, 201]:
+                        data = await resp.json()
+                        return {"success": True, "data": data}
+                    else:
+                        text = await resp.text()
+                        return {
+                            "success": False,
+                            "error": f"HTTP {resp.status}: {text}"
+                        }
+        except asyncio.TimeoutError:
+            return {"success": False, "error": "Timeout al conectar con el Codespace"}
+        except Exception as e:
+            return {"success": False, "error": str(e)}
+
+    async def obtener_ip_desde_webhook(self, codespace_url: str, auth_token: str = None) -> Optional[str]:
+        """
+        Obtiene la IP del servidor desde el webhook del Codespace
+        """
+        try:
+            url = f"{codespace_url}/minecraft/ip"
+            headers = {}
+            if auth_token:
+                headers["Authorization"] = f"Bearer {auth_token}"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    url,
+                    headers=headers,
+                    timeout=aiohttp.ClientTimeout(total=10)
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        if data.get("success"):
+                            return data.get("ip")
+            return None
+        except Exception as e:
+            print(f"Error obteniendo IP: {e}")
+            return None
+
     @app_commands.command(
         name="minecraft_start",
-        description="Inicia tu Codespace y monitorea el servidor de Minecraft"
-    )
-    @app_commands.describe(
-        ip="IP del servidor Minecraft (ej: ejemplo.com:25565)"
+        description="Inicia tu Codespace y el servidor de Minecraft automáticamente"
     )
     async def minecraft_start(
         self,
-        interaction: discord.Interaction,
-        ip: Optional[str] = None
+        interaction: discord.Interaction
     ):
-        """Inicia codespace y comienza monitoreo de servidor Minecraft"""
+        """Inicia codespace y servidor de Minecraft automáticamente"""
         calling_id = interaction.user.id
         owner_id, codespace, sesion = obtener_contexto_usuario(calling_id)
 
@@ -130,7 +190,7 @@ class CodespaceMinecraftCog(commands.Cog):
 
         await interaction.response.defer()
 
-        # Iniciar codespace
+        # 1. Iniciar codespace
         token = sesion["token"]
         success, mensaje = iniciar_codespace(token, codespace)
 
@@ -142,42 +202,120 @@ class CodespaceMinecraftCog(commands.Cog):
             await interaction.followup.send(embed=embed)
             return
 
-        # Si se proporcionó IP, iniciar monitoreo
+        # Mensaje inicial
+        embed = crear_embed_info(
+            "⏳ Iniciando Sistema",
+            (
+                f"**Codespace:** `{codespace}`\n"
+                f"**Iniciado por:** <@{calling_id}>\n\n"
+                "✅ Codespace iniciado\n"
+                "⏳ Esperando que esté listo (30 segundos)...\n"
+                "🎮 Luego se iniciará Minecraft automáticamente"
+            ),
+            footer="Esto puede tardar 1-2 minutos"
+        )
+        msg = await interaction.followup.send(embed=embed)
+
+        # 2. Esperar a que el Codespace esté listo
+        await asyncio.sleep(30)
+
+        # 3. Obtener URL del Codespace y auth token
+        codespace_url = sesion.get("codespace_url")
+        auth_token = os.getenv("WEB_SERVER_AUTH_TOKEN", "default_token_change_me")
+
+        if not codespace_url:
+            embed = crear_embed_error(
+                "❌ Configuración Incompleta",
+                (
+                    "No se encontró la URL del Codespace.\n\n"
+                    "Usa `/vincular` nuevamente para configurar correctamente."
+                )
+            )
+            await msg.edit(embed=embed)
+            return
+
+        # Actualizar mensaje
+        embed = crear_embed_info(
+            "⏳ Iniciando Minecraft",
+            (
+                f"**Codespace:** `{codespace}`\n\n"
+                "✅ Codespace listo\n"
+                "🚀 Ejecutando msx.py...\n"
+                "⏳ Iniciando servidor de Minecraft..."
+            ),
+            footer="Espera aproximadamente 1 minuto"
+        )
+        await msg.edit(embed=embed)
+
+        # 4. Llamar al webhook para iniciar Minecraft
+        resultado = await self.llamar_webhook_minecraft(codespace_url, auth_token)
+
+        if not resultado.get("success"):
+            embed = crear_embed_error(
+                "❌ Error al Iniciar Minecraft",
+                (
+                    f"**Error:** {resultado.get('error')}\n\n"
+                    "💡 **Posibles causas:**\n"
+                    "  • El servidor web no está ejecutándose en el Codespace\n"
+                    "  • Token de autenticación inválido\n"
+                    "  • msx.py no encontrado\n\n"
+                    "**Solución:**\n"
+                    "Ejecuta en el Codespace: `bash start_web_server.sh`"
+                )
+            )
+            await msg.edit(embed=embed)
+            return
+
+        # 5. Esperar a que el servidor esté completamente listo
+        await asyncio.sleep(30)
+
+        # 6. Obtener IP del servidor
+        ip = await self.obtener_ip_desde_webhook(codespace_url, auth_token)
+
+        if not ip:
+            # Intentar desde el estado
+            data = resultado.get("data", {})
+            estado = data.get("estado", {})
+            ip = estado.get("ip")
+
+        # 7. Mensaje final
         if ip:
+            # Iniciar monitoreo
             self.monitoreando[str(owner_id)] = {
                 "ip": ip,
                 "channel_id": interaction.channel_id
             }
             self.ultimo_estado[str(owner_id)] = False
-            
+
             embed = crear_embed_exito(
-                "✅ Codespace Iniciado",
+                "✅ Minecraft Iniciado",
                 (
                     f"**Codespace:** `{codespace}`\n"
-                    f"**Iniciado por:** <@{calling_id}>\n"
-                    f"**IP Minecraft:** `{ip}`\n\n"
-                    "⏳ Esperando ~30 segundos para que el Codespace esté listo...\n"
-                    "🔍 Monitoreando servidor Minecraft (recibirás notificación cuando esté online)"
+                    f"**IP del Servidor:** `{ip}`\n\n"
+                    "✅ Servidor de Minecraft iniciado correctamente\n"
+                    "🔍 Monitoreando estado (recibirás notificación cuando esté online)\n\n"
+                    "🎮 **Conéctate con:**\n"
+                    f"`{ip}`"
                 ),
-                footer="Usa /minecraft_stop para detener"
+                footer="Usa /minecraft_stop para detener el monitoreo"
             )
         else:
-            embed = crear_embed_exito(
-                "✅ Codespace Iniciado",
+            embed = crear_embed_warning(
+                "⚠️ Minecraft Iniciado (IP no detectada)",
                 (
-                    f"**Codespace:** `{codespace}`\n"
-                    f"**Iniciado por:** <@{calling_id}>\n\n"
-                    "⏳ Esperando ~30 segundos para que esté listo.\n\n"
-                    "💡 Usa `/minecraft_start ip:<tu_ip>` para monitorear el servidor"
+                    f"**Codespace:** `{codespace}`\n\n"
+                    "✅ Servidor de Minecraft iniciado\n"
+                    "⚠️ No se pudo detectar la IP automáticamente\n\n"
+                    "Usa `/minecraft_status` en el Codespace para ver la IP"
                 ),
-                footer="Usa /stop para detener"
+                footer="Puede tardar unos minutos en estar completamente listo"
             )
 
-        await interaction.followup.send(embed=embed)
+        await msg.edit(embed=embed)
         await enviar_log_al_propietario(
             self.bot,
             codespace,
-            f"Tu Codespace fue iniciado por <@{calling_id}>"
+            f"Minecraft iniciado por <@{calling_id}>"
         )
 
     @app_commands.command(
@@ -205,7 +343,7 @@ class CodespaceMinecraftCog(commands.Cog):
             embed = crear_embed_exito(
                 "✅ Monitoreo Detenido",
                 f"**IP:** `{ip}`\n\nYa no se monitoreará este servidor.",
-                footer="doce|tools v2"
+                footer="d0ce3|tools v2"
             )
         else:
             embed = crear_embed_info(
