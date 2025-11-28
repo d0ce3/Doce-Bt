@@ -33,15 +33,23 @@ def sesion_valida(sesion):
     if not sesion:
         return False
 
-    expira_str = sesion.get("expira")
-    if not expira_str:
+    # Verificar que tenga token
+    if not sesion.get("token"):
         return False
+
+    # Verificar expiración del token
+    expira_str = sesion.get("expira_token") or sesion.get("expira")
+    if not expira_str:
+        # Si no hay fecha de expiración, asumir que es válido
+        # (para compatibilidad con versiones antiguas)
+        return True
 
     try:
         expira = datetime.fromisoformat(expira_str)
         return datetime.now() < expira
     except:
-        return False
+        # Si hay error parseando la fecha, asumir válido
+        return True
 
 def puede_controlar(calling_id, owner_id):
     """Verifica si un usuario puede controlar el codespace de otro"""

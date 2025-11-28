@@ -18,6 +18,7 @@ bot = commands.Bot(command_prefix="!", intents=intents)
 
 
 def limpiar_tokens_expirados():
+    """Limpia tokens que hayan expirado"""
     sesiones = safe_load(SESIONES_FILE)
     cambios = False
     ahora = datetime.now()
@@ -48,6 +49,7 @@ async def load_cogs():
         "cogs.codespace_control",
         "cogs.codespace_minecraft",
         "cogs.info",
+        "cogs.addon_integration",  # Nuevo cog para integración con d0ce3-Addons
     ]
 
     for cog in cogs:
@@ -56,8 +58,6 @@ async def load_cogs():
             print(f"✅ Cog cargado: {cog}")
         except Exception as e:
             print(f"❌ Error cargando {cog}: {e}")
-            import traceback
-            traceback.print_exc()
             traceback.print_exc()
 
 

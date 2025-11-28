@@ -45,12 +45,17 @@ class SetupCog(commands.Cog):
         
         # Preservar codespace anterior si existe
         codespace_anterior = sesiones.get(user_id, {}).get("codespace")
+        codespace_url_anterior = sesiones.get(user_id, {}).get("codespace_url")
+        
+        # Token expira en 1 año (GitHub tokens no expiran automáticamente)
+        expira_token = datetime.now() + timedelta(days=365)
         
         sesiones[user_id] = {
             "token": token,
-            "expira": (datetime.now() + timedelta(hours=5)).isoformat(),
+            "expira_token": expira_token.isoformat(),
             "usuario_github": resultado,
             "codespace": codespace_anterior,
+            "codespace_url": codespace_url_anterior,
             "token_actualizado": datetime.now().isoformat()
         }
         safe_save(SESIONES_FILE, sesiones)
@@ -58,11 +63,11 @@ class SetupCog(commands.Cog):
         embed = crear_embed_exito(
             "✅ Token Configurado",
             (
-                f"Token guardado por 5 horas.\n"
+                f"Token guardado correctamente.\n"
                 f"Usuario GitHub: `{resultado}`\n\n"
                 "Ahora usa `/vincular` para conectar tu Codespace."
             ),
-            footer="doce|tools v2"
+            footer="d0ce3|tools v2"
         )
         await interaction.followup.send(embed=embed, ephemeral=True)
 
@@ -163,6 +168,37 @@ class SetupCog(commands.Cog):
             return
 
         # Vincular el codespace especificado
+        await interaction.response.defer(ephemeral=True)
+        
+        # Verificar que el codespace existe
+        codespaces_list, error = listar_codespaces(token)
+        if error:
+            embed = crear_embed_error(
+                "❌ Error verificando Codespace",
+                f"Error: {error}",
+            )
+            await interaction.followup.send(
+                embed=embed, ephemeral=True
+            )
+            return
+        
+        # Buscar el codespace
+        codespace_encontrado = None
+        for c in codespaces_list:
+            if c['name'] == codespace:
+                codespace_encontrado = c
+                break
+        
+        if not codespace_encontrado:
+            embed = crear_embed_error(
+                "❌ Codespace no encontrado",
+                f"No se encontró el Codespace `{codespace}`.\n\nUsa `/vincular` sin parámetros para ver tu lista.",
+            )
+            await interaction.followup.send(
+                embed=embed, ephemeral=True
+            )
+            return
+        
         vinculaciones = safe_load(VINCULACIONES_FILE)
         permisos_previos = vinculaciones.get(user_id, {}).get("permisos", [])
         historial = vinculaciones.get(user_id, {}).get("historial", [])
@@ -189,8 +225,13 @@ class SetupCog(commands.Cog):
         }
         safe_save(VINCULACIONES_FILE, vinculaciones)
 
+        # Actualizar sesión con URL del codespace
+        # Generar URL base del codespace para el addon integration
+        # Formato: https://<codespace-name>-8080.app.github.dev
+        codespace_url = f"https://{codespace}-8080.app.github.dev"
+        
         sesiones[user_id]["codespace"] = codespace
-        sesiones[user_id]["expira"] = (datetime.now() + timedelta(hours=5)).isoformat()
+        sesiones[user_id]["codespace_url"] = codespace_url
         safe_save(SESIONES_FILE, sesiones)
 
         # Formatear fecha para mostrar
@@ -201,22 +242,25 @@ class SetupCog(commands.Cog):
             "✅ Codespace Vinculado",
             (
                 f"**Codespace:** `{codespace}`\n"
+                f"**Estado:** {codespace_encontrado['state']}\n"
                 f"**Fecha:** {fecha_legible}\n\n"
-                "Ahora puedes usar los comandos de control desde Discord."
+                "Ahora puedes usar los comandos de control desde Discord.\n"
+                "El sistema de eventos está monitoreando tu Codespace."
             ),
-            footer="La sesión expira en 5 horas"
+            footer="d0ce3|tools v2"
         )
-        await interaction.response.send_message(
+        await interaction.followup.send(
             embed=embed, ephemeral=True
         )
 
     @app_commands.command(
         name="refrescar",
-        description="Renueva tu sesión por 5 horas más",
+        description="Verifica el estado de tu token y vinculación",
     )
     async def refrescar(self, interaction: discord.Interaction):
         user_id = str(interaction.user.id)
         sesiones = safe_load(SESIONES_FILE)
+        vinculaciones = safe_load(VINCULACIONES_FILE)
 
         if user_id not in sesiones or not sesiones[user_id].get("token"):
             await interaction.response.send_message(
@@ -225,22 +269,47 @@ class SetupCog(commands.Cog):
             )
             return
 
-        # Renovar sesión
-        sesiones[user_id]["expira"] = (
-            datetime.now() + timedelta(hours=5)
-        ).isoformat()
-        safe_save(SESIONES_FILE, sesiones)
-
-        # Calcular tiempo restante
-        expira = datetime.fromisoformat(sesiones[user_id]["expira"])
-        tiempo_restante = expira - datetime.now()
-        horas = int(tiempo_restante.total_seconds() // 3600)
-        minutos = int((tiempo_restante.total_seconds() % 3600) // 60)
+        sesion = sesiones[user_id]
+        vinculacion = vinculaciones.get(user_id, {})
+        
+        # Verificar token
+        token = sesion.get("token")
+        valido, resultado = validar_token(token)
+        
+        if not valido:
+            embed = crear_embed_error(
+                "❌ Token Inválido",
+                f"Tu token ya no es válido.\n\n**Error:** {resultado}\n\nUsa `/setup` para actualizar tu token."
+            )
+            await interaction.response.send_message(
+                embed=embed, ephemeral=True
+            )
+            return
+        
+        # Información de la sesión
+        usuario_github = sesion.get("usuario_github", "Desconocido")
+        codespace_actual = vinculacion.get("codespace", "Ninguno")
+        ultima_vinculacion = vinculacion.get("ultima_vinculacion")
+        
+        # Formatear última vinculación
+        fecha_vinculacion = "Nunca"
+        if ultima_vinculacion:
+            try:
+                dt = datetime.fromisoformat(ultima_vinculacion)
+                fecha_vinculacion = f"<t:{int(dt.timestamp())}:R>"
+            except:
+                pass
 
         embed = crear_embed_exito(
-            "✅ Sesión Renovada",
-            f"Tu sesión ha sido renovada.\n\n**Expira en:** {horas}h {minutos}m",
-            footer="Usa /refrescar cuando necesites renovar"
+            "✅ Estado de la Sesión",
+            (
+                f"**Usuario GitHub:** `{usuario_github}`\n"
+                f"**Codespace Actual:** `{codespace_actual}`\n"
+                f"**Última Vinculación:** {fecha_vinculacion}\n\n"
+                "✅ Token válido\n"
+                "✅ Sesión activa"
+            ),
+            footer="d0ce3|tools v2"
         )
         
         await interaction.response.send_message(
