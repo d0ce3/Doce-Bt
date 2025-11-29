@@ -32,7 +32,6 @@ class CodespaceMinecraftCog(commands.Cog):
 
     @tasks.loop(minutes=1)
     async def monitor_loop(self):
-        """Monitorea servidores de Minecraft cada minuto"""
         for user_id, data in list(self.monitoreando.items()):
             try:
                 ip = data.get("ip")
@@ -41,11 +40,9 @@ class CodespaceMinecraftCog(commands.Cog):
                 if not ip or not channel_id:
                     continue
                 
-                # Consultar estado del servidor
                 online = await self.verificar_servidor_minecraft(ip)
                 estado_anterior = self.ultimo_estado.get(user_id, False)
                 
-                # Si cambió el estado, notificar
                 if online != estado_anterior:
                     channel = self.bot.get_channel(channel_id)
                     if channel:
@@ -76,9 +73,7 @@ class CodespaceMinecraftCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def verificar_servidor_minecraft(self, ip: str) -> bool:
-        """Verifica si un servidor de Minecraft está online usando mcstatus.io"""
         try:
-            # Separar IP y puerto si existe
             if ":" in ip:
                 host, port = ip.split(":", 1)
             else:
@@ -98,16 +93,6 @@ class CodespaceMinecraftCog(commands.Cog):
             return False
 
     async def llamar_webhook_minecraft(self, codespace_url: str, auth_token: str) -> dict:
-        """
-        Llama al webhook del Codespace para iniciar Minecraft
-        
-        Args:
-            codespace_url: URL base del Codespace (ej: https://name-8080.app.github.dev)
-            auth_token: Token de autenticación para el webhook
-        
-        Returns:
-            dict: Respuesta del webhook
-        """
         try:
             url = f"{codespace_url}/minecraft/start"
             headers = {
@@ -136,9 +121,6 @@ class CodespaceMinecraftCog(commands.Cog):
             return {"success": False, "error": str(e)}
 
     async def obtener_ip_desde_webhook(self, codespace_url: str, auth_token: str = None) -> Optional[str]:
-        """
-        Obtiene la IP del servidor desde el webhook del Codespace
-        """
         try:
             url = f"{codespace_url}/minecraft/ip"
             headers = {}
@@ -168,7 +150,6 @@ class CodespaceMinecraftCog(commands.Cog):
         self,
         interaction: discord.Interaction
     ):
-        """Inicia codespace y servidor de Minecraft automáticamente"""
         calling_id = interaction.user.id
         owner_id, codespace, sesion = obtener_contexto_usuario(calling_id)
 
@@ -221,7 +202,6 @@ class CodespaceMinecraftCog(commands.Cog):
 
         # 3. Obtener URL del Codespace y auth token
         codespace_url = sesion.get("codespace_url")
-        auth_token = os.getenv("WEB_SERVER_AUTH_TOKEN", "default_token_change_me")
 
         if not codespace_url:
             embed = crear_embed_error(
@@ -233,6 +213,46 @@ class CodespaceMinecraftCog(commands.Cog):
             )
             await msg.edit(embed=embed)
             return
+
+        # Verificar servidor web + obtener token automáticamente
+        async with aiohttp.ClientSession() as session:
+            # 1. Health check
+            try:
+                async with session.get(f"{codespace_url}/health", timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        embed = crear_embed_error(
+                            "❌ Servidor Web No Activo",
+                            "Ejecuta auto_webserver_setup en tu Codespace"
+                        )
+                        await msg.edit(embed=embed)
+                        return
+            except Exception:
+                embed = crear_embed_error(
+                    "❌ Servidor Web No Activo",
+                    "Ejecuta auto_webserver_setup en tu Codespace"
+                )
+                await msg.edit(embed=embed)
+                return
+
+            # 2. Obtener token
+            try:
+                async with session.get(f"{codespace_url}/get_token", timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status != 200:
+                        embed = crear_embed_error(
+                            "❌ Token No Disponible",
+                            "Ejecuta auto_webserver_setup en tu Codespace"
+                        )
+                        await msg.edit(embed=embed)
+                        return
+                    token_data = await resp.json()
+                    auth_token = token_data['token']
+            except Exception:
+                embed = crear_embed_error(
+                    "❌ Error Obteniendo Token",
+                    "Ejecuta auto_webserver_setup en tu Codespace"
+                )
+                await msg.edit(embed=embed)
+                return
 
         # Actualizar mensaje
         embed = crear_embed_info(
@@ -273,14 +293,12 @@ class CodespaceMinecraftCog(commands.Cog):
         ip = await self.obtener_ip_desde_webhook(codespace_url, auth_token)
 
         if not ip:
-            # Intentar desde el estado
             data = resultado.get("data", {})
             estado = data.get("estado", {})
             ip = estado.get("ip")
 
         # 7. Mensaje final
         if ip:
-            # Iniciar monitoreo
             self.monitoreando[str(owner_id)] = {
                 "ip": ip,
                 "channel_id": interaction.channel_id
@@ -323,7 +341,6 @@ class CodespaceMinecraftCog(commands.Cog):
         description="Detiene el monitoreo del servidor de Minecraft"
     )
     async def minecraft_stop(self, interaction: discord.Interaction):
-        """Detiene el monitoreo de Minecraft"""
         calling_id = interaction.user.id
         owner_id, codespace, sesion = obtener_contexto_usuario(calling_id)
 
@@ -365,11 +382,9 @@ class CodespaceMinecraftCog(commands.Cog):
         interaction: discord.Interaction,
         ip: str
     ):
-        """Consulta el estado de un servidor de Minecraft"""
         await interaction.response.defer()
 
         try:
-            # Separar IP y puerto
             if ":" in ip:
                 host, port = ip.split(":", 1)
             else:
@@ -400,7 +415,6 @@ class CodespaceMinecraftCog(commands.Cog):
                 await interaction.followup.send(embed=embed)
                 return
             
-            # Servidor online - mostrar información
             players_online = data.get("players", {}).get("online", 0)
             players_max = data.get("players", {}).get("max", 0)
             version = data.get("version", {}).get("name_clean", "Desconocido")
@@ -417,7 +431,6 @@ class CodespaceMinecraftCog(commands.Cog):
                 inline=True
             )
             
-            # Latencia si está disponible
             if "latency" in data:
                 latency = data["latency"]
                 embed.add_field(
@@ -428,7 +441,6 @@ class CodespaceMinecraftCog(commands.Cog):
             
             embed.set_footer(text="Powered by mcstatus.io")
             
-            # Agregar favicon si existe
             if data.get("icon"):
                 embed.set_thumbnail(url=data["icon"])
             
@@ -449,3 +461,4 @@ class CodespaceMinecraftCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(CodespaceMinecraftCog(bot))
+    
