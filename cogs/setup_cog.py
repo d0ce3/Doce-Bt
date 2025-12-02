@@ -9,6 +9,7 @@ from utils.embed_factory import (
     crear_embed_exito,
     crear_embed_error,
     crear_embed_info,
+    crear_embed_warning,
 )
 from config import VINCULACIONES_FILE, SESIONES_FILE
 
@@ -43,11 +44,10 @@ class SetupCog(commands.Cog):
 
         sesiones = safe_load(SESIONES_FILE)
         
-        # Preservar codespace anterior si existe
         codespace_anterior = sesiones.get(user_id, {}).get("codespace")
         codespace_url_anterior = sesiones.get(user_id, {}).get("codespace_url")
+        tunnel_url_anterior = sesiones.get(user_id, {}).get("tunnel_url")
         
-        # Token expira en 1 año (GitHub tokens no expiran automáticamente)
         expira_token = datetime.now() + timedelta(days=365)
         
         sesiones[user_id] = {
@@ -56,6 +56,7 @@ class SetupCog(commands.Cog):
             "usuario_github": resultado,
             "codespace": codespace_anterior,
             "codespace_url": codespace_url_anterior,
+            "tunnel_url": tunnel_url_anterior,
             "token_actualizado": datetime.now().isoformat()
         }
         safe_save(SESIONES_FILE, sesiones)
@@ -98,7 +99,6 @@ class SetupCog(commands.Cog):
 
         token = sesiones[user_id]["token"]
 
-        # Si no especificó codespace, mostrar lista
         if not codespace:
             await interaction.response.defer(ephemeral=True)
 
@@ -123,7 +123,6 @@ class SetupCog(commands.Cog):
                 )
                 return
 
-            # Mostrar lista con información detallada
             vinculaciones = safe_load(VINCULACIONES_FILE)
             codespace_actual = vinculaciones.get(user_id, {}).get("codespace")
             historial = vinculaciones.get(user_id, {}).get("historial", [])
@@ -133,10 +132,8 @@ class SetupCog(commands.Cog):
                 nombre = c['name']
                 estado = c['state']
                 
-                # Marcar si es el actual
                 marca = "⭐" if nombre == codespace_actual else "  "
                 
-                # Buscar en historial
                 fecha_vinculacion = None
                 for h in historial:
                     if h.get("codespace") == nombre:
@@ -144,7 +141,6 @@ class SetupCog(commands.Cog):
                         break
                 
                 if fecha_vinculacion:
-                    # Parsear fecha
                     try:
                         dt = datetime.fromisoformat(fecha_vinculacion)
                         fecha_str = dt.strftime("%d/%m %H:%M")
@@ -167,10 +163,8 @@ class SetupCog(commands.Cog):
             )
             return
 
-        # Vincular el codespace especificado
         await interaction.response.defer(ephemeral=True)
         
-        # Verificar que el codespace existe
         codespaces_list, error = listar_codespaces(token)
         if error:
             embed = crear_embed_error(
@@ -182,7 +176,6 @@ class SetupCog(commands.Cog):
             )
             return
         
-        # Buscar el codespace
         codespace_encontrado = None
         for c in codespaces_list:
             if c['name'] == codespace:
@@ -203,19 +196,16 @@ class SetupCog(commands.Cog):
         permisos_previos = vinculaciones.get(user_id, {}).get("permisos", [])
         historial = vinculaciones.get(user_id, {}).get("historial", [])
         
-        # Agregar al historial
         fecha_actual = datetime.now().isoformat()
         
-        # Actualizar historial (máximo 10 entradas)
         nueva_entrada = {
             "codespace": codespace,
             "fecha": fecha_actual
         }
         
-        # Remover entrada anterior del mismo codespace si existe
         historial = [h for h in historial if h.get("codespace") != codespace]
         historial.insert(0, nueva_entrada)
-        historial = historial[:10]  # Mantener solo últimos 10
+        historial = historial[:10]
 
         vinculaciones[user_id] = {
             "codespace": codespace,
@@ -225,25 +215,44 @@ class SetupCog(commands.Cog):
         }
         safe_save(VINCULACIONES_FILE, vinculaciones)
 
-        # Actualizar sesión con URL del codespace
-        # Generar URL base del codespace para el addon integration
-        # Formato: https://<codespace-name>-8080.app.github.dev
         codespace_url = f"https://{codespace}-8080.app.github.dev"
         
         sesiones[user_id]["codespace"] = codespace
         sesiones[user_id]["codespace_url"] = codespace_url
+        
+        try:
+            import aiohttp
+            
+            tunnel_check_url = f"{codespace_url}/get_url"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(tunnel_check_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        tunnel_url = data.get('tunnel_url')
+                        
+                        if tunnel_url:
+                            sesiones[user_id]["tunnel_url"] = tunnel_url
+                            sesiones[user_id]["tunnel_actualizado"] = datetime.now().isoformat()
+                            print(f"✅ URL de Cloudflare Tunnel detectada: {tunnel_url}")
+        except Exception as e:
+            print(f"⚠️ No se pudo obtener URL del túnel: {e}")
+        
         safe_save(SESIONES_FILE, sesiones)
 
-        # Formatear fecha para mostrar
         dt = datetime.now()
         fecha_legible = dt.strftime("%d/%m/%Y %H:%M")
+
+        tunnel_info = ""
+        if sesiones[user_id].get("tunnel_url"):
+            tunnel_info = f"\n🌐 **Cloudflare Tunnel:** Detectado"
 
         embed = crear_embed_exito(
             "✅ Codespace Vinculado",
             (
                 f"**Codespace:** `{codespace}`\n"
                 f"**Estado:** {codespace_encontrado['state']}\n"
-                f"**Fecha:** {fecha_legible}\n\n"
+                f"**Fecha:** {fecha_legible}{tunnel_info}\n\n"
                 "Ahora puedes usar los comandos de control desde Discord.\n"
                 "El sistema de eventos está monitoreando tu Codespace."
             ),
@@ -252,6 +261,84 @@ class SetupCog(commands.Cog):
         await interaction.followup.send(
             embed=embed, ephemeral=True
         )
+
+    @app_commands.command(
+        name="actualizar_tunnel",
+        description="Actualiza la URL del Cloudflare Tunnel de tu Codespace"
+    )
+    async def actualizar_tunnel(self, interaction: discord.Interaction):
+        user_id = str(interaction.user.id)
+        sesiones = safe_load(SESIONES_FILE)
+
+        if user_id not in sesiones:
+            embed = crear_embed_error(
+                "❌ Sin Codespace",
+                "No tienes un Codespace vinculado.\n\nUsa `/vincular` primero."
+            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        await interaction.response.defer(ephemeral=True)
+
+        codespace_url = sesiones[user_id].get("codespace_url")
+        
+        if not codespace_url:
+            embed = crear_embed_error(
+                "❌ Configuración Incompleta",
+                "No se encontró la URL del Codespace."
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
+            return
+
+        try:
+            import aiohttp
+            
+            tunnel_check_url = f"{codespace_url}/get_url"
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(tunnel_check_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                    if resp.status != 200:
+                        embed = crear_embed_error(
+                            "❌ Servidor Web No Activo",
+                            "El servidor web no está respondiendo.\n\nAsegúrate de que tu Codespace esté ejecutándose."
+                        )
+                        await interaction.followup.send(embed=embed, ephemeral=True)
+                        return
+                    
+                    data = await resp.json()
+                    tunnel_url = data.get('tunnel_url')
+                    
+                    if not tunnel_url:
+                        embed = crear_embed_warning(
+                            "⚠️ Túnel No Disponible",
+                            (
+                                "El Cloudflare Tunnel no está activo.\n\n"
+                                "Verifica que auto_webserver_setup esté ejecutándose con Cloudflare activado."
+                            )
+                        )
+                        await interaction.followup.send(embed=embed, ephemeral=True)
+                        return
+                    
+                    sesiones[user_id]["tunnel_url"] = tunnel_url
+                    sesiones[user_id]["tunnel_actualizado"] = datetime.now().isoformat()
+                    safe_save(SESIONES_FILE, sesiones)
+                    
+                    embed = crear_embed_exito(
+                        "✅ Túnel Actualizado",
+                        (
+                            f"**URL del Túnel:**\n`{tunnel_url}`\n\n"
+                            "Los comandos ahora usarán esta URL para comunicarse con tu Codespace."
+                        ),
+                        footer="La URL cambia cada vez que se reinicia el túnel"
+                    )
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                    
+        except Exception as e:
+            embed = crear_embed_error(
+                "❌ Error",
+                f"Error al obtener URL del túnel:\n```{str(e)}```"
+            )
+            await interaction.followup.send(embed=embed, ephemeral=True)
 
     @app_commands.command(
         name="refrescar",
@@ -272,7 +359,6 @@ class SetupCog(commands.Cog):
         sesion = sesiones[user_id]
         vinculacion = vinculaciones.get(user_id, {})
         
-        # Verificar token
         token = sesion.get("token")
         valido, resultado = validar_token(token)
         
@@ -286,12 +372,11 @@ class SetupCog(commands.Cog):
             )
             return
         
-        # Información de la sesión
         usuario_github = sesion.get("usuario_github", "Desconocido")
         codespace_actual = vinculacion.get("codespace", "Ninguno")
         ultima_vinculacion = vinculacion.get("ultima_vinculacion")
+        tunnel_url = sesion.get("tunnel_url")
         
-        # Formatear última vinculación
         fecha_vinculacion = "Nunca"
         if ultima_vinculacion:
             try:
@@ -300,15 +385,20 @@ class SetupCog(commands.Cog):
             except:
                 pass
 
+        descripcion = (
+            f"**Usuario GitHub:** `{usuario_github}`\n"
+            f"**Codespace Actual:** `{codespace_actual}`\n"
+            f"**Última Vinculación:** {fecha_vinculacion}\n\n"
+            "✅ Token válido\n"
+            "✅ Sesión activa"
+        )
+        
+        if tunnel_url:
+            descripcion += f"\n🌐 Cloudflare Tunnel activo"
+
         embed = crear_embed_exito(
             "✅ Estado de la Sesión",
-            (
-                f"**Usuario GitHub:** `{usuario_github}`\n"
-                f"**Codespace Actual:** `{codespace_actual}`\n"
-                f"**Última Vinculación:** {fecha_vinculacion}\n\n"
-                "✅ Token válido\n"
-                "✅ Sesión activa"
-            ),
+            descripcion,
             footer="d0ce3|tools v2"
         )
         
@@ -349,20 +439,17 @@ class SetupCog(commands.Cog):
             )
             return
 
-        # Construir lista
         lista = []
         for i, entrada in enumerate(historial[:10], 1):
             nombre = entrada.get("codespace", "Desconocido")
             fecha = entrada.get("fecha", "")
             
-            # Formatear fecha
             try:
                 dt = datetime.fromisoformat(fecha)
                 fecha_str = dt.strftime("%d/%m/%Y %H:%M")
             except:
                 fecha_str = "Fecha desconocida"
             
-            # Marcar el actual
             marca = "⭐" if nombre == codespace_actual else f"{i}."
             lista.append(f"{marca} `{nombre}` - {fecha_str}")
 

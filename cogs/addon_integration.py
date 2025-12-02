@@ -33,24 +33,28 @@ class CodespaceEventConsumer:
         }
     
     def get_codespace_urls(self) -> List[str]:
-        """Obtiene las URLs de Codespaces desde sesiones"""
         sesiones = safe_load(SESIONES_FILE)
         urls = []
         
         for uid, data in sesiones.items():
-            codespace_url = data.get('codespace_url')
-            if codespace_url:
-                # Asegurar formato correcto
-                if not codespace_url.startswith('http'):
-                    codespace_url = f'https://{codespace_url}'
-                if not codespace_url.endswith(':8080'):
-                    codespace_url = codespace_url.rstrip('/') + ':8080'
-                urls.append(codespace_url)
+            # Prioridad 1: URL de Cloudflare Tunnel
+            tunnel_url = data.get('tunnel_url')
+            
+            if tunnel_url:
+                urls.append(tunnel_url)
+            else:
+                # Fallback: URL de Codespace nativa
+                codespace_url = data.get('codespace_url')
+                if codespace_url:
+                    if not codespace_url.startswith('http'):
+                        codespace_url = f'https://{codespace_url}'
+                    if not codespace_url.endswith(':8080'):
+                        codespace_url = codespace_url.rstrip('/') + ':8080'
+                    urls.append(codespace_url)
         
-        return list(set(urls))  # Eliminar duplicados
+        return list(set(urls))
     
     async def start(self):
-        """Inicia el consumer"""
         if self.running:
             logger.warning("Consumer ya está corriendo")
             return
@@ -63,7 +67,6 @@ class CodespaceEventConsumer:
         asyncio.create_task(self._polling_loop())
     
     async def stop(self):
-        """Detiene el consumer"""
         self.running = False
         
         if self.session:
@@ -73,7 +76,6 @@ class CodespaceEventConsumer:
         logger.info("⏹️ Consumer detenido")
     
     async def _polling_loop(self):
-        """Loop principal de polling"""
         while self.running:
             try:
                 codespace_urls = self.get_codespace_urls()
@@ -86,7 +88,6 @@ class CodespaceEventConsumer:
             await asyncio.sleep(self.poll_interval)
     
     async def _poll_all_codespaces(self, codespace_urls: List[str]):
-        """Pollea todos los Codespaces configurados"""
         tasks = [
             self._poll_codespace(url)
             for url in codespace_urls
@@ -95,7 +96,6 @@ class CodespaceEventConsumer:
         await asyncio.gather(*tasks, return_exceptions=True)
     
     async def _poll_codespace(self, codespace_url: str):
-        """Pollea un Codespace específico"""
         try:
             events_url = f"{codespace_url}/discord/events"
             
@@ -116,16 +116,15 @@ class CodespaceEventConsumer:
                     else:
                         logger.warning(f"⚠️  Error en respuesta de {codespace_url}: {data.get('error')}")
                 
-                elif response.status != 404:  # 404 es normal si no hay eventos
+                elif response.status != 404:
                     logger.warning(f"⚠️  HTTP {response.status} desde {codespace_url}")
         
         except aiohttp.ClientError:
-            pass  # Conexión fallida, normal si el codespace está apagado
+            pass
         except Exception as e:
             logger.error(f"❌ Error polling {codespace_url}: {e}")
     
     async def _process_event(self, event: Dict, codespace_url: str):
-        """Procesa un evento individual"""
         event_id = event['id']
         event_type = event['event_type']
         user_id = event['user_id']
@@ -167,7 +166,6 @@ class CodespaceEventConsumer:
             self.stats['total_failed'] += 1
     
     async def _handle_backup_error(self, user, payload):
-        """Maneja errores de backup"""
         error_type = payload.get('error_type', 'general')
         error_message = payload.get('error_message', 'Error desconocido')
         codespace_name = payload.get('codespace_name', 'Desconocido')
@@ -188,7 +186,6 @@ class CodespaceEventConsumer:
             logger.warning(f"No se pudo enviar DM a {user.id}")
     
     async def _handle_backup_success(self, user, payload):
-        """Maneja backups exitosos"""
         backup_file = payload.get('backup_file', 'Desconocido')
         size_mb = payload.get('size_mb', 0)
         duration = payload.get('duration_seconds', 0)
@@ -309,6 +306,7 @@ class AddonIntegration(commands.Cog):
     - Monitoreo de eventos desde Codespaces
     - Sistema de colas para backups y operaciones
     - Notificaciones automáticas
+    - Soporte para Cloudflare Tunnel
     """
     
     def __init__(self, bot: commands.Bot):
@@ -317,7 +315,6 @@ class AddonIntegration(commands.Cog):
     
     async def cog_load(self):
         """Se ejecuta cuando el cog se carga"""
-        # Iniciar el consumer automáticamente
         self.consumer = CodespaceEventConsumer(self.bot, poll_interval=30)
         await self.consumer.start()
         logger.info("✅ Consumer de eventos iniciado")
@@ -343,6 +340,10 @@ class AddonIntegration(commands.Cog):
         
         stats = self.consumer.get_stats()
         codespaces = self.consumer.get_codespace_urls()
+        
+        # Contar cuántas son Cloudflare Tunnel vs Codespace nativo
+        tunnel_count = sum(1 for url in codespaces if 'trycloudflare.com' in url)
+        codespace_count = len(codespaces) - tunnel_count
         
         embed = discord.Embed(
             title="📊 Estadísticas del Sistema de Eventos",
@@ -377,20 +378,31 @@ class AddonIntegration(commands.Cog):
             except:
                 pass
         
+        connection_info = f"{len(codespaces)} activo(s)"
+        if tunnel_count > 0:
+            connection_info += f" ({tunnel_count} vía Cloudflare Tunnel)"
+        
         embed.add_field(
             name="🖥️ Codespaces Monitoreados",
-            value=f"{len(codespaces)} activo(s)",
+            value=connection_info,
             inline=False
         )
         
         if codespaces:
+            urls_display = []
+            for url in codespaces[:5]:
+                if 'trycloudflare.com' in url:
+                    urls_display.append(f"• 🌐 `{url[:50]}...`")
+                else:
+                    urls_display.append(f"• 🔗 `{url[:50]}...`")
+            
             embed.add_field(
                 name="URLs",
-                value="\n".join([f"• `{url}`" for url in codespaces[:5]]),
+                value="\n".join(urls_display),
                 inline=False
             )
         
-        embed.set_footer(text="d0ce3|tools • Addon Integration")
+        embed.set_footer(text="d0ce3|tools • Addon Integration • 🌐 = Cloudflare Tunnel")
         
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
