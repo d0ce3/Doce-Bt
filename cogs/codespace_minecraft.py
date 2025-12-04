@@ -5,10 +5,9 @@ import asyncio
 import aiohttp
 from datetime import datetime
 from typing import Optional
-import os
 
 from utils.permissions import obtener_contexto_usuario, sesion_valida
-from utils.github_api import iniciar_codespace, estado_codespace
+from utils.codespace_wake import despertar_codespace_real, verificar_estado_codespace
 from utils.embed_factory import (
     crear_embed_exito,
     crear_embed_error,
@@ -17,7 +16,7 @@ from utils.embed_factory import (
 )
 from utils.notify import enviar_log_al_propietario
 from utils.jsondb import safe_load, safe_save
-from config import SESIONES_FILE, VINCULACIONES_FILE
+from config import SESIONES_FILE
 
 
 class CodespaceMinecraftCog(commands.Cog):
@@ -71,6 +70,7 @@ class CodespaceMinecraftCog(commands.Cog):
         await self.bot.wait_until_ready()
 
     async def verificar_servidor_minecraft(self, ip: str) -> bool:
+        """Verifica si un servidor de Minecraft está online usando mcstatus.io"""
         try:
             if ":" in ip:
                 host, port = ip.split(":", 1)
@@ -141,6 +141,7 @@ class CodespaceMinecraftCog(commands.Cog):
             return None
 
     async def esperar_servidor_web(self, codespace_url: str, max_intentos: int = 40) -> bool:
+        """Espera a que el servidor web del Codespace esté disponible"""
         for intento in range(max_intentos):
             try:
                 async with aiohttp.ClientSession() as session:
@@ -179,12 +180,9 @@ class CodespaceMinecraftCog(commands.Cog):
 
     @app_commands.command(
         name="minecraft_start",
-        description="Inicia tu Codespace y el servidor de Minecraft automáticamente"
+        description="Inicia tu Codespace REALMENTE y ejecuta el servidor de Minecraft automáticamente"
     )
-    async def minecraft_start(
-        self,
-        interaction: discord.Interaction
-    ):
+    async def minecraft_start(self, interaction: discord.Interaction):
         calling_id = interaction.user.id
         owner_id, codespace, sesion = obtener_contexto_usuario(calling_id)
 
@@ -207,29 +205,8 @@ class CodespaceMinecraftCog(commands.Cog):
         await interaction.response.defer()
 
         token = sesion["token"]
-        success, mensaje = iniciar_codespace(token, codespace)
-
-        if not success:
-            embed = crear_embed_error(
-                "❌ Error al Iniciar",
-                f"**Codespace:** `{codespace}`\n\n**Error:** {mensaje}"
-            )
-            await interaction.followup.send(embed=embed)
-            return
-
-        embed = crear_embed_info(
-            "⏳ Iniciando Sistema",
-            (
-                f"**Codespace:** `{codespace}`\n"
-                f"**Iniciado por:** <@{calling_id}>\n\n"
-                "✅ Codespace iniciado\n"
-                "⏳ Esperando que esté listo (esto puede tardar 3-4 minutos)...\n"
-                "🎮 Luego se iniciará Minecraft automáticamente"
-            ),
-            footer="Ten paciencia, el Codespace está cargando todos los servicios"
-        )
-        msg = await interaction.followup.send(embed=embed)
-
+        
+        # Obtener URLs guardadas
         sesiones = safe_load(SESIONES_FILE)
         tunnel_url = sesiones.get(str(owner_id), {}).get("tunnel_url")
         codespace_url_nativa = sesiones.get(str(owner_id), {}).get("codespace_url")
@@ -239,95 +216,177 @@ class CodespaceMinecraftCog(commands.Cog):
                 "❌ Configuración Incompleta",
                 "No se encontró la URL del Codespace."
             )
-            await msg.edit(embed=embed)
+            await interaction.followup.send(embed=embed)
             return
 
         embed = crear_embed_info(
-            "⏳ Esperando Servidor Web",
+            "🚀 Iniciando Sistema Completo",
+            (
+                f"**Codespace:** `{codespace}`\n"
+                f"**Iniciado por:** <@{calling_id}>\n\n"
+                "**Fase 1: Despertar Codespace (REAL)**\n"
+                "⏳ Iniciando VM con requests HTTP...\n"
+                "⏳ Esto puede tardar 1-3 minutos\n\n"
+                "A diferencia del método anterior, esto REALMENTE despierta la VM."
+            ),
+            footer="Ten paciencia, estamos iniciando la VM completa"
+        )
+        msg = await interaction.followup.send(embed=embed)
+
+        print(f"🚀 [Minecraft Start] Fase 1: Despertando Codespace '{codespace}'")
+        
+        # Usar la URL que tengamos disponible
+        url_para_despertar = tunnel_url or codespace_url_nativa
+        
+        success, mensaje = await despertar_codespace_real(
+            token=token,
+            codespace_name=codespace,
+            codespace_url=url_para_despertar,
+            max_intentos=12,
+            timeout_inicial=180
+        )
+
+        if not success:
+            embed = crear_embed_error(
+                "❌ Error al Despertar Codespace",
+                (
+                    f"**Codespace:** `{codespace}`\n\n"
+                    f"**Error:** {mensaje}\n\n"
+                    "**Posibles causas:**\n"
+                    "• El Codespace está tardando más de lo normal\n"
+                    "• Problemas de conectividad con GitHub\n"
+                    "• El Codespace requiere inicio manual\n\n"
+                    "**Soluciones:**\n"
+                    "1. Espera 2-3 minutos y usa `/status`\n"
+                    "2. Inicia manualmente desde GitHub\n"
+                    "3. Intenta de nuevo"
+                )
+            )
+            await msg.edit(embed=embed)
+            return
+
+        print(f"✅ [Minecraft Start] Fase 1 completa: {mensaje}")
+
+        embed = crear_embed_info(
+            "🚀 Iniciando Sistema Completo",
             (
                 f"**Codespace:** `{codespace}`\n\n"
-                "✅ Codespace iniciado\n"
-                "🔄 Esperando que el servidor web esté disponible...\n"
-                "⏱️ Esto puede tardar hasta 3 minutos"
+                "**Fase 1: Despertar Codespace** ✅\n"
+                f"└─ {mensaje}\n\n"
+                "**Fase 2: Detectar Cloudflare Tunnel**\n"
+                "⏳ Verificando si hay un túnel activo..."
             ),
-            footer="El puerto debe configurarse como público automáticamente"
+            footer="Cloudflare Tunnel proporciona mejor conectividad"
         )
         await msg.edit(embed=embed)
 
         codespace_url = None
         
         if tunnel_url:
-            print(f"Intentando usar Cloudflare Tunnel: {tunnel_url}")
+            print(f"🌐 [Minecraft Start] Intentando Cloudflare Tunnel guardado: {tunnel_url}")
             if await self.esperar_servidor_web(tunnel_url, max_intentos=5):
                 codespace_url = tunnel_url
-                print("✅ Cloudflare Tunnel está activo")
+                print("✅ [Minecraft Start] Cloudflare Tunnel guardado está activo")
+
 
         if not codespace_url:
-            print("Intentando obtener nuevo Cloudflare Tunnel...")
+            print("🔍 [Minecraft Start] Intentando detectar nuevo Cloudflare Tunnel...")
             nuevo_tunnel = await self.obtener_tunnel_url(codespace_url_nativa, max_intentos=10)
             
             if nuevo_tunnel:
                 codespace_url = nuevo_tunnel
                 sesiones[str(owner_id)]["tunnel_url"] = nuevo_tunnel
                 safe_save(SESIONES_FILE, sesiones)
-                print(f"✅ Nuevo Cloudflare Tunnel detectado: {nuevo_tunnel}")
+                print(f"✅ [Minecraft Start] Nuevo Cloudflare Tunnel detectado: {nuevo_tunnel}")
 
+        # Si no hay tunnel, usar URL nativa
         if not codespace_url:
-            print("Usando URL nativa del Codespace...")
-            servidor_listo = await self.esperar_servidor_web(codespace_url_nativa, max_intentos=40)
-            
-            if not servidor_listo:
-                embed = crear_embed_error(
-                    "❌ Timeout",
-                    (
-                        "El servidor web no respondió después de 3 minutos.\n\n"
-                        "**Posibles causas:**\n"
-                        "• El Codespace está tardando más de lo normal\n"
-                        "• El puerto 8080 sigue privado\n"
-                        "• auto_webserver_setup no se ejecutó\n\n"
-                        "**Solución:**\n"
-                        "1. Ve a tu Codespace manualmente\n"
-                        "2. Ejecuta: `bash start_web_server.sh`\n"
-                        "3. Intenta `/minecraft_start` nuevamente"
-                    )
-                )
-                await msg.edit(embed=embed)
-                return
-            
+            print("🔗 [Minecraft Start] Usando URL nativa del Codespace...")
             codespace_url = codespace_url_nativa
 
-        async with aiohttp.ClientSession() as session:
-            try:
-                async with session.get(f"{codespace_url}/get_token", timeout=aiohttp.ClientTimeout(total=5)) as resp:
-                    if resp.status != 200:
-                        embed = crear_embed_error(
-                            "❌ Token No Disponible",
-                            "No se pudo obtener el token de autenticación"
-                        )
-                        await msg.edit(embed=embed)
-                        return
-                    token_data = await resp.json()
-                    auth_token = token_data['token']
-            except Exception:
-                embed = crear_embed_error(
-                    "❌ Error Obteniendo Token",
-                    "No se pudo obtener el token de autenticación"
-                )
-                await msg.edit(embed=embed)
-                return
-
         embed = crear_embed_info(
-            "⏳ Iniciando Minecraft",
+            "🚀 Iniciando Sistema Completo",
             (
                 f"**Codespace:** `{codespace}`\n\n"
-                "✅ Codespace listo\n"
-                "🚀 Ejecutando msx.py...\n"
-                "⏳ Iniciando servidor de Minecraft..."
+                "**Fase 1: Despertar Codespace** ✅\n"
+                "**Fase 2: Detectar Tunnel** ✅\n\n"
+                "**Fase 3: Verificar Servidor Web**\n"
+                "⏳ Esperando puerto 8080...\n"
+                f"   Conectando a: `{codespace_url[:50]}...`"
             ),
-            footer="Espera aproximadamente 1 minuto"
+            footer="El servidor web debe estar configurado como público"
         )
         await msg.edit(embed=embed)
 
+        print(f"🔄 [Minecraft Start] Fase 3: Esperando servidor web en {codespace_url}")
+        
+        servidor_listo = await self.esperar_servidor_web(codespace_url, max_intentos=40)
+
+        if not servidor_listo:
+            embed = crear_embed_error(
+                "❌ Servidor Web No Disponible",
+                (
+                    f"**Codespace:** `{codespace}`\n\n"
+                    "✅ Codespace despierto REALMENTE\n"
+                    "❌ Pero el servidor web (puerto 8080) no responde\n\n"
+                    "**Posibles causas:**\n"
+                    "• El puerto 8080 no está configurado como público\n"
+                    "• auto_webserver_setup no se ejecutó\n"
+                    "• El servidor web tardó más de 3 minutos\n\n"
+                    "**Solución:**\n"
+                    "1. Ve a tu Codespace manualmente\n"
+                    "2. Ejecuta: `bash start_web_server.sh`\n"
+                    "3. Configura el puerto 8080 como público\n"
+                    "4. Intenta `/minecraft_start` nuevamente"
+                )
+            )
+            await msg.edit(embed=embed)
+            return
+
+        print(f"✅ [Minecraft Start] Fase 3 completa: Servidor web respondiendo")
+
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.get(
+                    f"{codespace_url}/get_token",
+                    timeout=aiohttp.ClientTimeout(total=5)
+                ) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"HTTP {resp.status}")
+                    token_data = await resp.json()
+                    auth_token = token_data['token']
+            
+            print(f"✅ [Minecraft Start] Token de autenticación obtenido")
+        except Exception as e:
+            embed = crear_embed_error(
+                "❌ Error Obteniendo Token",
+                (
+                    f"No se pudo obtener el token de autenticación:\n"
+                    f"```{str(e)}```\n\n"
+                    "Verifica que el servidor web esté configurado correctamente."
+                )
+            )
+            await msg.edit(embed=embed)
+            return
+        
+        embed = crear_embed_info(
+            "🚀 Iniciando Sistema Completo",
+            (
+                f"**Codespace:** `{codespace}`\n\n"
+                "**Fase 1: Despertar Codespace** ✅\n"
+                "**Fase 2: Detectar Tunnel** ✅\n"
+                "**Fase 3: Servidor Web** ✅\n"
+                "**Fase 4: Token** ✅\n\n"
+                "**Fase 5: Minecraft**\n"
+                "⏳ Ejecutando msx.py...\n"
+                "   (iniciando servidor de Minecraft)"
+            ),
+            footer="Último paso - espera ~1 minuto"
+        )
+        await msg.edit(embed=embed)
+
+        print(f"🎮 [Minecraft Start] Fase 5: Iniciando Minecraft...")
+        
         resultado = await self.llamar_webhook_minecraft(codespace_url, auth_token)
 
         if not resultado.get("success"):
@@ -336,14 +395,17 @@ class CodespaceMinecraftCog(commands.Cog):
                 (
                     f"**Error:** {resultado.get('error')}\n\n"
                     "💡 **Posibles causas:**\n"
-                    "  • El servidor web no está ejecutándose\n"
+                    "  • El servidor web está activo pero msx.py falló\n"
                     "  • Token de autenticación inválido\n"
-                    "  • msx.py no encontrado"
+                    "  • msx.py no encontrado o con errores\n\n"
+                    "Verifica los logs en tu Codespace."
                 )
             )
             await msg.edit(embed=embed)
             return
 
+        print(f"✅ [Minecraft Start] Fase 5 completa: Minecraft iniciado")
+        print(f"🔍 [Minecraft Start] Fase 6: Obteniendo IP del servidor...")
         await asyncio.sleep(30)
 
         ip = await self.obtener_ip_desde_webhook(codespace_url, auth_token)
@@ -360,35 +422,56 @@ class CodespaceMinecraftCog(commands.Cog):
             }
             self.ultimo_estado[str(owner_id)] = False
 
+            conexion_info = "🌐 Cloudflare Tunnel" if 'trycloudflare.com' in codespace_url else "🔗 Codespace Nativo"
+
             embed = crear_embed_exito(
-                "✅ Minecraft Iniciado",
+                "✅ Sistema Completamente Iniciado",
                 (
                     f"**Codespace:** `{codespace}`\n"
-                    f"**IP del Servidor:** `{ip}`\n\n"
-                    "✅ Servidor de Minecraft iniciado correctamente\n"
+                    f"**IP del Servidor:** `{ip}`\n"
+                    f"**Conexión:** {conexion_info}\n\n"
+                    "✅ **Fase 1:** Codespace despierto REALMENTE\n"
+                    "✅ **Fase 2:** Cloudflare Tunnel detectado\n"
+                    "✅ **Fase 3:** Servidor web activo\n"
+                    "✅ **Fase 4:** Autenticación OK\n"
+                    "✅ **Fase 5:** Minecraft iniciado\n"
+                    "✅ **Fase 6:** IP obtenida\n\n"
                     "🔍 Monitoreando estado (recibirás notificación cuando esté online)\n\n"
                     "🎮 **Conéctate con:**\n"
-                    f"`{ip}`"
+                    f"```{ip}```"
                 ),
                 footer="Usa /minecraft_stop para detener el monitoreo"
             )
+            print(f"✅ [Minecraft Start] COMPLETADO - IP: {ip}")
         else:
             embed = crear_embed_warning(
                 "⚠️ Minecraft Iniciado (IP no detectada)",
                 (
                     f"**Codespace:** `{codespace}`\n\n"
-                    "✅ Servidor de Minecraft iniciado\n"
+                    "✅ Codespace despierto REALMENTE\n"
+                    "✅ Minecraft iniciado\n"
                     "⚠️ No se pudo detectar la IP automáticamente\n\n"
-                    "Usa `/minecraft_status` en el Codespace para ver la IP"
+                    "**Posibles razones:**\n"
+                    "• El servidor está iniciando aún\n"
+                    "• El puerto no está configurado\n"
+                    "• Problemas con la detección de IP\n\n"
+                    "Usa `/minecraft_status` para verificar manualmente."
                 ),
-                footer="Puede tardar unos minutos en estar completamente listo"
+                footer="Puede tardar 2-3 minutos en estar completamente listo"
             )
+            print(f"⚠️ [Minecraft Start] COMPLETADO pero sin IP detectada")
 
         await msg.edit(embed=embed)
         await enviar_log_al_propietario(
             self.bot,
             codespace,
-            f"Minecraft iniciado por <@{calling_id}>"
+            (
+                f"✅ Sistema completo iniciado por <@{calling_id}>\n\n"
+                f"Detalles técnicos:\n"
+                f"• {mensaje}\n"
+                f"• Conexión: {'Cloudflare Tunnel' if 'trycloudflare.com' in codespace_url else 'Nativa'}\n"
+                f"• IP: {ip if ip else 'No detectada'}"
+            )
         )
 
     @app_commands.command(
@@ -415,7 +498,7 @@ class CodespaceMinecraftCog(commands.Cog):
             embed = crear_embed_exito(
                 "✅ Monitoreo Detenido",
                 f"**IP:** `{ip}`\n\nYa no se monitoreará este servidor.",
-                footer="d0ce3|tools v2"
+                footer="d0ce3|tools"
             )
         else:
             embed = crear_embed_info(
@@ -513,6 +596,7 @@ class CodespaceMinecraftCog(commands.Cog):
                 f"Error al consultar el servidor:\n```{str(e)}```"
             )
             await interaction.followup.send(embed=embed)
+
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(CodespaceMinecraftCog(bot))

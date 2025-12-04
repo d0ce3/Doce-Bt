@@ -3,11 +3,8 @@ from discord.ext import commands
 from discord import app_commands
 
 from utils.permissions import obtener_contexto_usuario, sesion_valida
-from utils.github_api import (
-    iniciar_codespace,
-    detener_codespace,
-    estado_codespace,
-)
+from utils.github_api import detener_codespace, estado_codespace
+from utils.codespace_wake import despertar_codespace_real, verificar_estado_codespace
 from utils.embed_factory import (
     crear_embed_exito,
     crear_embed_error,
@@ -33,13 +30,11 @@ class CodespaceControlCog(commands.Cog):
 
     @app_commands.command(
         name="start",
-        description="Inicia tu Codespace o uno autorizado",
+        description="Inicia tu Codespace (REALMENTE lo despierta, no solo cambia estado)",
     )
     async def start(self, interaction: discord.Interaction):
         calling_id = interaction.user.id
-        owner_id, codespace, sesion = obtener_contexto_usuario(
-            calling_id
-        )
+        owner_id, codespace, sesion = obtener_contexto_usuario(calling_id)
 
         if not owner_id:
             embed = crear_embed_error(
@@ -49,9 +44,7 @@ class CodespaceControlCog(commands.Cog):
                     "Pide al propietario que te otorgue acceso con `/permitir`."
                 ),
             )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         if not sesion_valida(sesion):
@@ -62,41 +55,91 @@ class CodespaceControlCog(commands.Cog):
                     "Pide al propietario que renueve su token con `/setup`."
                 ),
             )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         self.renovar_vinculacion(owner_id)
 
+        # Mostrar mensaje inicial
         await interaction.response.defer()
 
         token = sesion["token"]
-        success, mensaje = iniciar_codespace(token, codespace)
+        
+        # Obtener URL del codespace (priorizar Cloudflare Tunnel)
+        codespace_url = sesion.get("tunnel_url") or sesion.get("codespace_url")
+        
+        # Crear embed de inicio
+        embed_inicio = crear_embed_info(
+            "🔄 Iniciando Codespace",
+            (
+                f"**Codespace:** `{codespace}`\n"
+                f"**Iniciado por:** <@{calling_id}>\n\n"
+                "⏳ **Despertando la máquina virtual...**\n\n"
+                "Este proceso puede tardar 1-3 minutos:\n"
+                "1. ✅ Cambiar estado en API\n"
+                "2. 🔄 Despertar VM con requests HTTP\n"
+                "3. ✅ Verificar que esté completamente activo\n\n"
+                "💡 Esto es diferente al `/start` anterior que solo cambiaba el estado."
+            ),
+            footer="Ten paciencia, estamos iniciando la VM REALMENTE"
+        )
+        await interaction.followup.send(embed=embed_inicio)
+        
+        # 🔥 USAR NUEVA FUNCIÓN: Despertar REALMENTE el codespace
+        print(f"🚀 Despertando Codespace '{codespace}' para usuario {owner_id}")
+        
+        success, mensaje = await despertar_codespace_real(
+            token=token,
+            codespace_name=codespace,
+            codespace_url=codespace_url,
+            max_intentos=12,  # 12 intentos
+            timeout_inicial=180  # 3 minutos máximo
+        )
 
         if success:
             embed = crear_embed_exito(
-                "✅ Codespace Iniciado",
+                "✅ Codespace Iniciado y Listo",
                 (
                     f"**Codespace:** `{codespace}`\n"
                     f"**Iniciado por:** <@{calling_id}>\n\n"
-                    "⏳ Espera ~30 segundos para que esté completamente listo."
+                    f"✅ **{mensaje}**\n\n"
+                    "🎮 La VM está completamente activa y lista para usar.\n"
+                    "Ahora puedes:\n"
+                    "• Ejecutar `/minecraft_start` para iniciar Minecraft\n"
+                    "• Conectarte vía navegador o VS Code\n"
+                    "• Ejecutar comandos remotos"
                 ),
-                footer="Usa /status para verificar el estado",
+                footer="La VM está REALMENTE despierta, no en hibernación"
             )
-            await interaction.followup.send(embed=embed)
+            await interaction.edit_original_response(embed=embed)
 
             await enviar_log_al_propietario(
                 self.bot,
                 codespace,
-                f"Tu Codespace fue iniciado por <@{calling_id}>",
+                f"✅ Tu Codespace fue iniciado EXITOSAMENTE por <@{calling_id}>.\n\n"
+                f"Mensaje: {mensaje}"
             )
         else:
+            # Obtener estado actual para diagnóstico
+            estado_actual, _ = await verificar_estado_codespace(token, codespace)
+            
             embed = crear_embed_error(
-                "❌ Error al Iniciar",
-                f"**Codespace:** `{codespace}`\n\n**Error:** {mensaje}",
+                "❌ Error al Despertar Codespace",
+                (
+                    f"**Codespace:** `{codespace}`\n"
+                    f"**Estado actual:** `{estado_actual}`\n\n"
+                    f"**Error:** {mensaje}\n\n"
+                    "**Posibles causas:**\n"
+                    "• El Codespace está tardando más de lo normal\n"
+                    "• Problemas de conectividad con GitHub\n"
+                    "• El Codespace puede requerir inicio manual\n\n"
+                    "**Soluciones:**\n"
+                    "1. Espera 2-3 minutos y usa `/status` para verificar\n"
+                    "2. Intenta iniciar manualmente desde GitHub\n"
+                    "3. Si el estado es 'Available', el Codespace está listo"
+                ),
             )
-            await interaction.followup.send(embed=embed)
+            await interaction.edit_original_response(embed=embed)
 
     @app_commands.command(
         name="stop",
@@ -104,18 +147,14 @@ class CodespaceControlCog(commands.Cog):
     )
     async def stop(self, interaction: discord.Interaction):
         calling_id = interaction.user.id
-        owner_id, codespace, sesion = obtener_contexto_usuario(
-            calling_id
-        )
+        owner_id, codespace, sesion = obtener_contexto_usuario(calling_id)
 
         if not owner_id:
             embed = crear_embed_error(
                 "❌ Sin Acceso",
                 "No tienes permiso para detener ningún Codespace.",
             )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         if not sesion_valida(sesion):
@@ -123,9 +162,7 @@ class CodespaceControlCog(commands.Cog):
                 "⏱️ Sesión Expirada",
                 "La sesión del propietario expiró.",
             )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         self.renovar_vinculacion(owner_id)
@@ -140,9 +177,10 @@ class CodespaceControlCog(commands.Cog):
                 "✅ Codespace Detenido",
                 (
                     f"**Codespace:** `{codespace}`\n"
-                    f"**Detenido por:** <@{calling_id}>"
+                    f"**Detenido por:** <@{calling_id}>\n\n"
+                    "La VM se está apagando correctamente."
                 ),
-                footer="doce|tools v2",
+                footer="d0ce3|tools v2"
             )
             await interaction.followup.send(embed=embed)
 
@@ -164,18 +202,14 @@ class CodespaceControlCog(commands.Cog):
     )
     async def status(self, interaction: discord.Interaction):
         calling_id = interaction.user.id
-        owner_id, codespace, sesion = obtener_contexto_usuario(
-            calling_id
-        )
+        owner_id, codespace, sesion = obtener_contexto_usuario(calling_id)
 
         if not owner_id:
             embed = crear_embed_error(
                 "❌ Sin Acceso",
                 "No tienes acceso a ningún Codespace.",
             )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         if not sesion_valida(sesion):
@@ -183,9 +217,7 @@ class CodespaceControlCog(commands.Cog):
                 "⏱️ Sesión Expirada",
                 "La sesión del propietario expiró.",
             )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
+            await interaction.response.send_message(embed=embed, ephemeral=True)
             return
 
         self.renovar_vinculacion(owner_id)
@@ -214,6 +246,14 @@ class CodespaceControlCog(commands.Cog):
             "Unknown": "❓",
         }
         emoji_estado = emojis.get(estado, "⚪")
+        
+        # Información adicional según el estado
+        info_adicional = {
+            "Available": "✅ Completamente activo y listo para usar",
+            "Starting": "⏳ Iniciando... usa `/start` si tardó más de 3 minutos",
+            "Shutdown": "🔴 Apagado - usa `/start` para iniciar",
+            "Unknown": "❓ Estado desconocido - verifica en GitHub"
+        }
 
         embed = crear_embed_info(
             "📊 Estado del Codespace",
@@ -221,14 +261,24 @@ class CodespaceControlCog(commands.Cog):
         )
         embed.add_field(
             name="Estado",
-            value=f"{emoji_estado} {estado}",
-            inline=True,
+            value=f"{emoji_estado} **{estado}**\n{info_adicional.get(estado, '')}",
+            inline=False,
         )
         embed.add_field(
-            name="Sesión",
+            name="Sesión del Token",
             value=tiempo_restante,
             inline=True,
         )
+        
+        # Mostrar URL si está disponible
+        tunnel_url = sesion.get("tunnel_url")
+        if tunnel_url:
+            embed.add_field(
+                name="🌐 Conexión",
+                value="Cloudflare Tunnel activo",
+                inline=True,
+            )
+        
         if error:
             embed.add_field(
                 name="⚠️ Advertencia",
