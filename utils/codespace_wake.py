@@ -1,15 +1,3 @@
-"""
-utils/codespace_wake.py
-
-Módulo para DESPERTAR REALMENTE un Codespace (no solo cambiar estado en API).
-Usa requests HTTP para simular abrir el navegador, lo que inicia la VM.
-
-Compatible con:
-- URLs nativas de Codespace
-- Cloudflare Tunnel
-- Sistema multiusuario
-"""
-
 import asyncio
 import aiohttp
 from typing import Tuple, Optional
@@ -20,141 +8,214 @@ async def despertar_codespace_real(
     token: str,
     codespace_name: str,
     codespace_url: Optional[str] = None,
-    max_intentos: int = 12,
-    timeout_inicial: int = 180
+    max_intentos: int = 20,
+    timeout_inicial: int = 300
 ) -> Tuple[bool, str]:
     """
-    Despierta REALMENTE un Codespace iniciando la VM.
+    Despierta REALMENTE un Codespace de hibernación.
     
-    Este método hace 3 cosas:
-    1. Inicia el Codespace vía API (cambia estado a "Starting")
-    2. Hace requests HTTP al endpoint web del Codespace (simula abrir navegador)
-    3. Verifica que el estado final sea "Available"
+    Estrategia:
+    1. Iniciar vía API (si está apagado)
+    2. Hacer conexiones HTTP PERSISTENTES al web_url (esto despierta la VM)
+    3. Intentar múltiples puertos (443, 8080) para forzar despertar
+    4. Verificar que /health o cualquier endpoint responda
     
     Args:
         token: GitHub Personal Access Token
         codespace_name: Nombre del codespace
-        codespace_url: URL del codespace (si no se provee, se construye)
-        max_intentos: Número máximo de intentos de conexión
-        timeout_inicial: Tiempo total máximo de espera (segundos)
+        codespace_url: URL del codespace (opcional)
+        max_intentos: Intentos máximos (default: 20)
+        timeout_inicial: Timeout total en segundos (default: 300 = 5 min)
         
     Returns:
         (success: bool, mensaje: str)
     """
     try:
-        # Paso 1: Iniciar el codespace con la API
-        print(f"🔄 Iniciando Codespace '{codespace_name}' vía API...")
+        print(f"\n{'='*60}")
+        print(f"🚀 INICIANDO DESPERTAR REAL DE CODESPACE")
+        print(f"   Codespace: {codespace_name}")
+        print(f"   Intentos: {max_intentos}")
+        print(f"   Timeout: {timeout_inicial}s")
+        print(f"{'='*60}\n")
+        
+        # PASO 1: Iniciar vía API
+        print("📡 Paso 1: Iniciando vía API de GitHub...")
         _, error = api_request(
             token,
             f"/user/codespaces/{codespace_name}/start",
             method="POST"
         )
         
-        # No es error si ya está iniciado
         if error and "already" not in error.lower() and "running" not in error.lower():
+            print(f"   ❌ Error en API: {error}")
             return False, f"Error en API de GitHub: {error}"
         
-        # Paso 2: Obtener información del codespace
+        print("   ✅ API respondió OK")
+        
+        # PASO 2: Obtener información del codespace
+        print("\n📋 Paso 2: Obteniendo información del Codespace...")
         data, error = api_request(token, f"/user/codespaces/{codespace_name}")
         if error:
-            return False, f"Error obteniendo info del codespace: {error}"
+            print(f"   ❌ Error obteniendo info: {error}")
+            return False, f"Error obteniendo info: {error}"
         
-        # Construir URL web del codespace
-        if not codespace_url:
-            web_url = data.get("web_url")
-            if not web_url:
-                return False, "No se pudo obtener la URL del Codespace"
-        else:
-            web_url = codespace_url
+        estado_inicial = data.get("state", "Unknown")
+        print(f"   Estado en API: {estado_inicial}")
         
-        print(f"🌐 URL del Codespace: {web_url}")
+        # Obtener web_url (esta es la URL PRINCIPAL del navegador)
+        web_url = data.get("web_url")
+        if not web_url:
+            print("   ❌ No se encontró web_url")
+            return False, "No se pudo obtener la URL del Codespace"
         
-        # Paso 3: Hacer requests HTTP para despertar la VM
-        headers = {
-            "User-Agent": "Mozilla/5.0 (d0ce3-Bt/2.0) Discord Bot",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": "en-US,en;q=0.5",
-            "Connection": "keep-alive",
-        }
+        print(f"   Web URL: {web_url}")
         
-        print(f"⏳ Intentando despertar VM del Codespace...")
-        print(f"   Intentos máximos: {max_intentos}")
-        print(f"   Timeout total: {timeout_inicial}s")
+        # PASO 3: URLs a probar (múltiples estrategias)
+        urls_a_probar = []
+        
+        # URL principal del navegador (esta SIEMPRE despierta el Codespace)
+        urls_a_probar.append(("web_principal", web_url))
+        
+        # Si tenemos codespace_url personalizada (tunnel), agregarla
+        if codespace_url and codespace_url != web_url:
+            urls_a_probar.append(("custom", codespace_url))
+            urls_a_probar.append(("custom_health", f"{codespace_url}/health"))
+        
+        # URL del puerto 8080 si existe
+        if "web_url" in data:
+            base_url = web_url.replace("https://", "").split(".app.github.dev")[0]
+            url_8080 = f"https://{base_url}-8080.app.github.dev"
+            urls_a_probar.append(("puerto_8080", url_8080))
+            urls_a_probar.append(("puerto_8080_health", f"{url_8080}/health"))
+        
+        print(f"\n🌐 Paso 3: Probando {len(urls_a_probar)} URLs para despertar VM...")
         
         tiempo_por_intento = timeout_inicial / max_intentos
+        conexion_exitosa = False
+        url_exitosa = None
+        tipo_exitoso = None
+        
+        # Headers que simulan un navegador real
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-Site": "none",
+            "Sec-Fetch-User": "?1",
+            "Cache-Control": "max-age=0"
+        }
         
         async with aiohttp.ClientSession() as session:
             for intento in range(max_intentos):
-                try:
-                    print(f"   Intento {intento + 1}/{max_intentos}...")
-                    
-                    # Hacer request GET al codespace
-                    async with session.get(
-                        web_url,
-                        headers=headers,
-                        timeout=aiohttp.ClientTimeout(total=tiempo_por_intento),
-                        allow_redirects=True
-                    ) as resp:
-                        status = resp.status
+                print(f"\n🔄 Intento {intento + 1}/{max_intentos}")
+                
+                # Probar cada URL en este intento
+                for tipo, url in urls_a_probar:
+                    try:
+                        print(f"   → Probando {tipo}: {url[:60]}...")
                         
-                        # 200: Codespace respondió (probablemente esté listo)
-                        if status == 200:
-                            print(f"   ✅ Respuesta 200 - Codespace respondiendo")
+                        async with session.get(
+                            url,
+                            headers=headers,
+                            timeout=aiohttp.ClientTimeout(total=tiempo_por_intento),
+                            allow_redirects=True,
+                            ssl=False  # Ignorar certificados SSL
+                        ) as resp:
+                            status = resp.status
                             
-                            # Esperar un poco más para asegurar
-                            await asyncio.sleep(5)
-                            
-                            # Verificar estado final
-                            estado_data, _ = api_request(
-                                token,
-                                f"/user/codespaces/{codespace_name}"
-                            )
-                            
-                            if estado_data:
-                                estado_final = estado_data.get("state")
+                            # Cualquier respuesta 2xx o 3xx indica que el servidor responde
+                            if 200 <= status < 400:
+                                print(f"   ✅ {tipo} respondió HTTP {status}")
+                                conexion_exitosa = True
+                                url_exitosa = url
+                                tipo_exitoso = tipo
                                 
-                                if estado_final == "Available":
-                                    tiempo_total = (intento + 1) * tiempo_por_intento
-                                    return True, f"Codespace despertado exitosamente (tomó ~{int(tiempo_total)}s)"
-                                else:
-                                    print(f"   ⚠️ Estado aún es '{estado_final}', continuando...")
-                        
-                        # 202: Aceptado pero aún procesando
-                        elif status == 202:
-                            print(f"   🔄 HTTP 202 - Codespace iniciando...")
-                        
-                        # 503: Servicio no disponible (aún cargando)
-                        elif status == 503:
-                            print(f"   ⏳ HTTP 503 - VM aún cargando...")
-                        
-                        # 302/307: Redirección (puede ser parte del inicio)
-                        elif status in [302, 307, 308]:
-                            print(f"   🔀 HTTP {status} - Siguiendo redirección...")
-                        
-                        else:
-                            print(f"   ⚠️ HTTP {status} - Estado inesperado")
+                                # Si es la URL principal, definitivamente está despierto
+                                if tipo == "web_principal":
+                                    print(f"\n{'='*60}")
+                                    print(f"🎉 VM DESPERTADA EXITOSAMENTE")
+                                    print(f"   URL: {url}")
+                                    print(f"   Intentos: {intento + 1}")
+                                    print(f"   Tiempo: ~{int((intento + 1) * tiempo_por_intento)}s")
+                                    print(f"{'='*60}\n")
+                                    
+                                    # Verificar estado final
+                                    await asyncio.sleep(2)
+                                    estado_data, _ = api_request(token, f"/user/codespaces/{codespace_name}")
+                                    if estado_data:
+                                        estado_final = estado_data.get("state")
+                                        return True, f"Codespace despertado (estado: {estado_final}, tomó ~{int((intento + 1) * tiempo_por_intento)}s)"
+                                    
+                                    return True, f"Codespace despertado exitosamente (tomó ~{int((intento + 1) * tiempo_por_intento)}s)"
+                            
+                            # 503 = Service Unavailable (VM iniciando)
+                            elif status == 503:
+                                print(f"   🟡 {tipo} HTTP 503 - VM iniciando...")
+                            
+                            # 502 = Bad Gateway (VM no lista aún)
+                            elif status == 502:
+                                print(f"   🟡 {tipo} HTTP 502 - VM no lista...")
+                            
+                            else:
+                                print(f"   ⚠️ {tipo} HTTP {status}")
+                    
+                    except asyncio.TimeoutError:
+                        print(f"   ⏱️ {tipo} - Timeout")
+                    
+                    except aiohttp.ClientConnectorError:
+                        print(f"   ⚠️ {tipo} - No se pudo conectar")
+                    
+                    except Exception as e:
+                        print(f"   ⚠️ {tipo} - Error: {type(e).__name__}")
                 
-                except asyncio.TimeoutError:
-                    print(f"   ⏱️ Timeout en intento {intento + 1}")
-                
-                except aiohttp.ClientError as e:
-                    print(f"   ⚠️ Error de conexión: {type(e).__name__}")
-                
-                except Exception as e:
-                    print(f"   ❌ Error inesperado: {str(e)}")
+                # Si ya tuvimos una conexión exitosa, verificar estado
+                if conexion_exitosa and intento >= 3:
+                    print(f"\n🔍 Verificando estado después de conexión exitosa...")
+                    estado_data, _ = api_request(token, f"/user/codespaces/{codespace_name}")
+                    if estado_data:
+                        estado_actual = estado_data.get("state")
+                        print(f"   Estado actual: {estado_actual}")
+                        
+                        if estado_actual == "Available":
+                            print(f"\n{'='*60}")
+                            print(f"🎉 CODESPACE COMPLETAMENTE ACTIVO")
+                            print(f"   URL que respondió: {url_exitosa}")
+                            print(f"   Tipo: {tipo_exitoso}")
+                            print(f"   Tiempo total: ~{int((intento + 1) * tiempo_por_intento)}s")
+                            print(f"{'='*60}\n")
+                            return True, f"Codespace activo (verificado vía {tipo_exitoso}, tomó ~{int((intento + 1) * tiempo_por_intento)}s)"
                 
                 # Esperar antes del siguiente intento
                 if intento < max_intentos - 1:
                     await asyncio.sleep(3)
         
-        # Si llegamos aquí, agotamos los intentos
+        # Si hubo alguna conexión exitosa pero no llegó a Available
+        if conexion_exitosa:
+            print(f"\n⚠️ Hubo conexión exitosa pero estado no confirmado")
+            return True, f"Codespace respondió (vía {tipo_exitoso}) pero estado no confirmado. Puede estar iniciando servicios."
+        
+        # Si llegamos aquí, no hubo éxito
+        print(f"\n{'='*60}")
+        print(f"❌ NO SE PUDO DESPERTAR EL CODESPACE")
+        print(f"   Intentos: {max_intentos}")
+        print(f"   Tiempo: {timeout_inicial}s")
+        print(f"{'='*60}\n")
+        
         return False, (
             f"El Codespace no respondió después de {max_intentos} intentos "
-            f"({timeout_inicial}s). Puede estar tardando más de lo usual. "
-            "Intenta verificar manualmente en GitHub."
+            f"({timeout_inicial}s). La VM puede requerir inicio manual desde GitHub. "
+            f"Estado en API: {estado_inicial}"
         )
     
     except Exception as e:
+        print(f"\n❌ ERROR INESPERADO: {str(e)}")
+        import traceback
+        traceback.print_exc()
         return False, f"Error inesperado: {str(e)}"
 
 
@@ -212,5 +273,6 @@ async def esperar_codespace_listo(
         
         await asyncio.sleep(intervalo)
     
+    # Timeout
     estado_final, _ = await verificar_estado_codespace(token, codespace_name)
     return False, f"Timeout esperando estado 'Available'. Estado actual: {estado_final}"
