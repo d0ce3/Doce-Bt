@@ -39,6 +39,9 @@ class Database:
                     startup_created BOOLEAN DEFAULT FALSE,
                     configured_at TIMESTAMP,
                     vinculado_at TIMESTAMP,
+                    notification_mode TEXT DEFAULT 'dm',
+                    notification_channel_id TEXT,
+                    notification_guild_id TEXT,
                     created_at TIMESTAMP DEFAULT NOW(),
                     updated_at TIMESTAMP DEFAULT NOW()
                 )

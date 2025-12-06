@@ -288,6 +288,11 @@ cd "$WORKSPACE_ROOT" || {{
 
 echo -e "${{BLUE}}📂 Workspace: $WORKSPACE_ROOT${{NC}}" | tee -a "$LOG_FILE"
 
+if ! python3 -c "import requests" 2>/dev/null; then
+    echo -e "${{YELLOW}}📦 Instalando requests...${{NC}}" | tee -a "$LOG_FILE"
+    pip install --quiet requests > /tmp/pip_requests.log 2>&1
+fi
+
 if [ -f requirements.txt ]; then
     echo -e "${{YELLOW}}📦 Instalando dependencias de Python...${{NC}}" | tee -a "$LOG_FILE"
     pip install --quiet -r requirements.txt > /tmp/pip_install.log 2>&1 && \\
@@ -302,41 +307,38 @@ if [ -f web_server.py ]; then
     WEB_PID=$!
     echo -e "${{GREEN}}✅ Web server iniciado (PID: $WEB_PID)${{NC}}" | tee -a "$LOG_FILE"
     
-    echo -e "${{YELLOW}}⏳ Esperando a que Cloudflare Tunnel inicie (45s)...${{NC}}" | tee -a "$LOG_FILE"
-    sleep 45
+    echo -e "${{YELLOW}}⏳ Esperando a que Cloudflare Tunnel inicie (60s)...${{NC}}" | tee -a "$LOG_FILE"
+    sleep 60
     
     TUNNEL_URL=""
+    MAX_RETRIES=5
     
-    if [ -f /tmp/cloudflared.log ]; then
-        TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\\\\.trycloudflare\\\\.com' /tmp/cloudflared.log | tail -1)
-        if [ -n "$TUNNEL_URL" ]; then
-            echo -e "${{GREEN}}✅ Tunnel detectado desde logs: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
+    for attempt in $(seq 1 $MAX_RETRIES); do
+        echo -e "${{YELLOW}}🔍 Intento $attempt/$MAX_RETRIES: Detectando tunnel...${{NC}}" | tee -a "$LOG_FILE"
+        
+        if [ -f /tmp/cloudflared.log ]; then
+            TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\\\\.trycloudflare\\\\.com' /tmp/cloudflared.log | tail -1)
+            if [ -n "$TUNNEL_URL" ]; then
+                echo -e "${{GREEN}}✅ Tunnel detectado desde logs: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
+                break
+            fi
         fi
-    fi
-    
-    if [ -z "$TUNNEL_URL" ]; then
-        echo -e "${{YELLOW}}🔍 Consultando endpoint local...${{NC}}" | tee -a "$LOG_FILE"
+        
         TUNNEL_RESPONSE=$(curl -s http://localhost:8080/get_url 2>/dev/null || echo "{{}}")
-        TUNNEL_URL=$(echo "$TUNNEL_RESPONSE" | grep -oP '"tunnel_url"\\\\s*:\\\\s*"\\\\K[^"]+' || echo "")
+        TUNNEL_URL=$(echo "$TUNNEL_RESPONSE" | python3 -c "import sys, json; data = json.load(sys.stdin); print(data.get('tunnel_url', ''))" 2>/dev/null || echo "")
         
-        if [ -n "$TUNNEL_URL" ]; then
+        if [ -n "$TUNNEL_URL" ] && [ "$TUNNEL_URL" != "None" ]; then
             echo -e "${{GREEN}}✅ Tunnel detectado desde API: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
+            break
         fi
-    fi
-    
-    if [ -z "$TUNNEL_URL" ]; then
-        echo -e "${{YELLOW}}⏳ Reintentando detección en 15s...${{NC}}" | tee -a "$LOG_FILE"
-        sleep 15
         
-        TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\\\\.trycloudflare\\\\.com' /tmp/cloudflared.log | tail -1)
-        
-        if [ -z "$TUNNEL_URL" ]; then
-            TUNNEL_RESPONSE=$(curl -s http://localhost:8080/get_url 2>/dev/null || echo "{{}}")
-            TUNNEL_URL=$(echo "$TUNNEL_RESPONSE" | grep -oP '"tunnel_url"\\\\s*:\\\\s*"\\\\K[^"]+' || echo "")
+        if [ $attempt -lt $MAX_RETRIES ]; then
+            echo -e "${{YELLOW}}⏳ Esperando 15s antes de reintentar...${{NC}}" | tee -a "$LOG_FILE"
+            sleep 15
         fi
-    fi
+    done
     
-    if [ -n "$TUNNEL_URL" ]; then
+    if [ -n "$TUNNEL_URL" ] && [ "$TUNNEL_URL" != "None" ]; then
         echo -e "${{GREEN}}✅ Cloudflare Tunnel detectado: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
         
         echo "$TUNNEL_URL" > /tmp/tunnel_url.txt
@@ -344,31 +346,43 @@ if [ -f web_server.py ]; then
         echo -e "${{YELLOW}}📤 Notificando al bot de Discord...${{NC}}" | tee -a "$LOG_FILE"
         
         CODESPACE_NAME="${{CODESPACE_NAME:-unknown}}"
-        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
         
-        JSON_PAYLOAD=$(cat <<EOF
-{{
-  "user_id": "$DISCORD_USER_ID",
-  "codespace_name": "$CODESPACE_NAME",
-  "tunnel_url": "$TUNNEL_URL",
-  "tunnel_type": "cloudflare",
-  "timestamp": "$TIMESTAMP",
-  "auto_started": true
-}}
-EOF
-)
+        NOTIFY_RESPONSE=$(python3 -c "
+import requests
+import json
+import sys
+
+try:
+    payload = {{
+        'user_id': '$DISCORD_USER_ID',
+        'codespace_name': '$CODESPACE_NAME',
+        'tunnel_url': '$TUNNEL_URL',
+        'tunnel_type': 'cloudflare',
+        'tunnel_port': 8080,
+        'timestamp': '$TIMESTAMP',
+        'auto_started': True
+    }}
+    
+    response = requests.post(
+        '$BOT_WEBHOOK_URL',
+        json=payload,
+        timeout=15
+    )
+    
+    print(response.status_code)
+    sys.exit(0 if response.status_code == 200 else 1)
+except Exception as e:
+    print(f'ERROR: {{e}}', file=sys.stderr)
+    sys.exit(1)
+" 2>&1)
         
-        RESPONSE=$(curl -s -X POST "$BOT_WEBHOOK_URL" \\\\
-          -H "Content-Type: application/json" \\\\
-          -d "$JSON_PAYLOAD" \\\\
-          -w "\\\\n%{{http_code}}")
+        NOTIFY_EXIT_CODE=$?
         
-        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
-        
-        if [ "$HTTP_CODE" = "200" ]; then
-            echo -e "${{GREEN}}✅ Bot notificado exitosamente${{NC}}" | tee -a "$LOG_FILE"
+        if [ $NOTIFY_EXIT_CODE -eq 0 ]; then
+            echo -e "${{GREEN}}✅ Bot notificado exitosamente (HTTP $NOTIFY_RESPONSE)${{NC}}" | tee -a "$LOG_FILE"
         else
-            echo -e "${{YELLOW}}⚠️  No se pudo notificar al bot (HTTP $HTTP_CODE)${{NC}}" | tee -a "$LOG_FILE"
+            echo -e "${{RED}}❌ Error notificando al bot: $NOTIFY_RESPONSE${{NC}}" | tee -a "$LOG_FILE"
         fi
     else
         echo -e "${{RED}}❌ No se pudo detectar URL del Cloudflare Tunnel${{NC}}" | tee -a "$LOG_FILE"

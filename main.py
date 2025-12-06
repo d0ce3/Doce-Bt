@@ -65,6 +65,7 @@ async def load_cogs():
     cogs = [
         "cogs.setup_cog",
         "cogs.permisos",
+        "cogs.notificaciones",
         "cogs.codespace_control",
         "cogs.codespace_minecraft",
         "cogs.info",

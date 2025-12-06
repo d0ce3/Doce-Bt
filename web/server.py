@@ -110,7 +110,12 @@ def webhook_tunnel_notify():
             async def send_notification():
                 try:
                     import discord
-                    user = await bot.fetch_user(int(user_id))
+                    
+                    notification_mode = sesion.get("notification_mode", "dm")
+                    
+                    if notification_mode == "disabled":
+                        print(f"🔕 Notificaciones desactivadas para usuario {user_id}")
+                        return False
                     
                     description = (
                         f"**Codespace:** `{codespace_name}`\n"
@@ -128,9 +133,34 @@ def webhook_tunnel_notify():
                         color=discord.Color.green()
                     )
                     
-                    await user.send(embed=embed)
-                    return True
-                except:
+                    if notification_mode == "channel":
+                        channel_id = sesion.get("notification_channel_id")
+                        if channel_id:
+                            try:
+                                channel = bot.get_channel(int(channel_id))
+                                if channel:
+                                    user = await bot.fetch_user(int(user_id))
+                                    embed.description = f"{user.mention}\n\n" + embed.description
+                                    await channel.send(embed=embed)
+                                    print(f"📢 Notificación enviada a canal {channel_id}")
+                                    return True
+                                else:
+                                    print(f"⚠️ Canal {channel_id} no encontrado, enviando DM")
+                                    user = await bot.fetch_user(int(user_id))
+                                    await user.send(embed=embed)
+                                    return True
+                            except:
+                                print(f"❌ Error enviando a canal, intentando DM")
+                                user = await bot.fetch_user(int(user_id))
+                                await user.send(embed=embed)
+                                return True
+                    else:
+                        user = await bot.fetch_user(int(user_id))
+                        await user.send(embed=embed)
+                        print(f"💬 Notificación enviada por DM a {user_id}")
+                        return True
+                except Exception as e:
+                    print(f"❌ Error enviando notificación: {e}")
                     return False
 
             loop = bot.loop
