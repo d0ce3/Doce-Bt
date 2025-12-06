@@ -156,12 +156,20 @@ def webhook_tunnel_notify():
 
 @app.route('/health', methods=['GET'])
 def health_check():
+    db_status = "disconnected"
     try:
         db = get_db()
-        db.conn.cursor().execute("SELECT 1")
-        return jsonify({"status": "healthy", "database": "connected"}), 200
-    except:
-        return jsonify({"status": "unhealthy", "database": "disconnected"}), 500
+        if db and db.conn:
+            db.conn.cursor().execute("SELECT 1")
+            db_status = "connected"
+    except Exception as e:
+        print(f"Health check DB error: {e}")
+    
+    return jsonify({
+        "status": "ok",
+        "database": db_status,
+        "bot": "running" if get_bot() else "not_ready"
+    }), 200
 
 def run_flask():
     from config import PORT
