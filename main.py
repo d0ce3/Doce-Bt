@@ -3,6 +3,8 @@ from discord.ext import commands
 import asyncio
 from threading import Thread
 import traceback
+import os
+import json
 from config import DISCORD_BOT_TOKEN, GUILD_ID
 from web.server import run_flask, set_bot
 from web.auto_ping import self_ping
@@ -14,6 +16,28 @@ intents.message_content = True
 intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
+
+def cleanup_legacy_json_files():
+    json_files = [
+        'data/sesiones.json',
+        'data/vinculaciones.json',
+        'data/permisos.json'
+    ]
+    
+    for filepath in json_files:
+        if os.path.exists(filepath):
+            try:
+                with open(filepath, 'r') as f:
+                    json.load(f)
+            except json.JSONDecodeError:
+                print(f"⚠️  {filepath} corrupto, eliminando...")
+                try:
+                    os.remove(filepath)
+                    print(f"✅ {filepath} eliminado")
+                except Exception as e:
+                    print(f"❌ Error eliminando {filepath}: {e}")
+            except Exception as e:
+                print(f"⚠️  Error leyendo {filepath}: {e}")
 
 def limpiar_tokens_expirados():
     try:
@@ -65,6 +89,7 @@ async def on_ready():
         print("✅ Conectado a Supabase")
     except Exception as e:
         print(f"❌ Error conectando a Supabase: {e}")
+        traceback.print_exc()
     
     try:
         if GUILD_ID:
@@ -105,6 +130,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
         await interaction.response.send_message("❌ No tienes permisos para este comando.", ephemeral=True)
     else:
         print(f"❌ Error en comando: {error}")
+        traceback.print_exc()
         if not interaction.response.is_done():
             await interaction.response.send_message("❌ Ocurrió un error. Inténtalo de nuevo.", ephemeral=True)
 
@@ -112,13 +138,16 @@ async def main():
     print("=" * 50)
     print("🚀 Iniciando Doce-Bt")
     print("=" * 50)
+    print()
 
     if not DISCORD_BOT_TOKEN:
         print("❌ Error: DISCORD_BOT_TOKEN no configurado")
         return
 
+    cleanup_legacy_json_files()
+
     async with bot:
-        print("\n📦 Cargando extensiones...")
+        print("📦 Cargando extensiones...")
         await load_cogs()
         
         print(f"\n🌳 Comandos cargados: {len(list(bot.tree.walk_commands()))}")
