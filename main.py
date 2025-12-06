@@ -110,7 +110,7 @@ async def on_app_command_error(interaction: discord.Interaction, error: discord.
 
 async def main():
     print("=" * 50)
-    print("🚀 Iniciando Doce-Bt v2 con Supabase")
+    print("🚀 Iniciando Doce-Bt")
     print("=" * 50)
 
     if not DISCORD_BOT_TOKEN:
