@@ -1,471 +1,470 @@
 import discord
-from discord.ext import commands
 from discord import app_commands
-from datetime import datetime, timedelta
-
-from utils.jsondb import safe_load, safe_save
-from utils.github_api import validar_token, listar_codespaces
-from utils.embed_factory import (
-    crear_embed_exito,
-    crear_embed_error,
-    crear_embed_info,
-    crear_embed_warning,
-)
-from config import VINCULACIONES_FILE, SESIONES_FILE
-
+from discord.ext import commands
+import aiohttp
+import base64
+import json
+from datetime import datetime
+from utils.database import get_db
+from config import RENDER_EXTERNAL_URL
 
 class SetupCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-
-    @app_commands.command(
-        name="setup",
-        description="Configura tu token personal de GitHub",
-    )
-    @app_commands.describe(
-        token="Tu token personal con scope 'codespace'"
-    )
-    async def setup(self, interaction: discord.Interaction, token: str):
-        await interaction.response.defer(ephemeral=True)
-
-        user_id = str(interaction.user.id)
-        valido, resultado = validar_token(token)
-
-        if not valido:
-            embed = crear_embed_error(
-                "❌ Token Inválido",
-                (
-                    f"No se pudo validar el token.\n\n**Error:** {resultado}\n\n"
-                    "Asegúrate que tenga scope `codespace`."
-                ),
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
-
-        sesiones = safe_load(SESIONES_FILE)
-        
-        codespace_anterior = sesiones.get(user_id, {}).get("codespace")
-        codespace_url_anterior = sesiones.get(user_id, {}).get("codespace_url")
-        tunnel_url_anterior = sesiones.get(user_id, {}).get("tunnel_url")
-        
-        expira_token = datetime.now() + timedelta(days=365)
-        
-        sesiones[user_id] = {
-            "token": token,
-            "expira_token": expira_token.isoformat(),
-            "usuario_github": resultado,
-            "codespace": codespace_anterior,
-            "codespace_url": codespace_url_anterior,
-            "tunnel_url": tunnel_url_anterior,
-            "token_actualizado": datetime.now().isoformat()
-        }
-        safe_save(SESIONES_FILE, sesiones)
-
-        embed = crear_embed_exito(
-            "✅ Token Configurado",
-            (
-                f"Token guardado correctamente.\n"
-                f"Usuario GitHub: `{resultado}`\n\n"
-                "Ahora usa `/vincular` para conectar tu Codespace."
-            ),
-            footer="d0ce3|tools v2"
-        )
-        await interaction.followup.send(embed=embed, ephemeral=True)
-
-    @app_commands.command(
-        name="vincular",
-        description="Vincula tu Codespace a tu cuenta",
-    )
-    @app_commands.describe(
-        codespace="Nombre de tu Codespace (opcional, se mostrará lista)"
-    )
-    async def vincular(
-        self,
-        interaction: discord.Interaction,
-        codespace: str | None = None,
-    ):
-        user_id = str(interaction.user.id)
-        sesiones = safe_load(SESIONES_FILE)
-
-        if user_id not in sesiones or not sesiones[user_id].get("token"):
-            embed = crear_embed_error(
-                "❌ Token no configurado",
-                "Antes configura tu token con `/setup`",
-            )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
-            return
-
-        token = sesiones[user_id]["token"]
-
-        if not codespace:
-            await interaction.response.defer(ephemeral=True)
-
-            codespaces_list, error = listar_codespaces(token)
-            if error:
-                embed = crear_embed_error(
-                    "❌ Error listando Codespaces",
-                    f"Error: {error}",
-                )
-                await interaction.followup.send(
-                    embed=embed, ephemeral=True
-                )
-                return
-
-            if not codespaces_list:
-                embed = crear_embed_error(
-                    "❌ No tienes Codespaces",
-                    "Crea uno en GitHub y vuelve a intentarlo.",
-                )
-                await interaction.followup.send(
-                    embed=embed, ephemeral=True
-                )
-                return
-
-            vinculaciones = safe_load(VINCULACIONES_FILE)
-            codespace_actual = vinculaciones.get(user_id, {}).get("codespace")
-            historial = vinculaciones.get(user_id, {}).get("historial", [])
-            
-            lista = []
-            for c in codespaces_list[:10]:
-                nombre = c['name']
-                estado = c['state']
-                
-                marca = "⭐" if nombre == codespace_actual else "  "
-                
-                fecha_vinculacion = None
-                for h in historial:
-                    if h.get("codespace") == nombre:
-                        fecha_vinculacion = h.get("fecha")
-                        break
-                
-                if fecha_vinculacion:
-                    try:
-                        dt = datetime.fromisoformat(fecha_vinculacion)
-                        fecha_str = dt.strftime("%d/%m %H:%M")
-                        lista.append(f"{marca} `{nombre}` - {estado} (vinculado: {fecha_str})")
-                    except:
-                        lista.append(f"{marca} `{nombre}` - {estado}")
-                else:
-                    lista.append(f"{marca} `{nombre}` - {estado}")
-            
-            descripcion = "\n".join(lista)
-            descripcion += "\n\n⭐ = Codespace actual"
-            descripcion += "\n\nUsa `/vincular codespace:<nombre>` para vincular uno."
-            
-            embed = crear_embed_info(
-                "📋 Tus Codespaces",
-                descripcion
-            )
-            await interaction.followup.send(
-                embed=embed, ephemeral=True
-            )
-            return
-
+    
+    @app_commands.command(name="setup")
+    async def setup_unified(self, interaction: discord.Interaction, github_token: str):
         await interaction.response.defer(ephemeral=True)
         
-        codespaces_list, error = listar_codespaces(token)
-        if error:
-            embed = crear_embed_error(
-                "❌ Error verificando Codespace",
-                f"Error: {error}",
-            )
-            await interaction.followup.send(
-                embed=embed, ephemeral=True
-            )
-            return
-        
-        codespace_encontrado = None
-        for c in codespaces_list:
-            if c['name'] == codespace:
-                codespace_encontrado = c
-                break
-        
-        if not codespace_encontrado:
-            embed = crear_embed_error(
-                "❌ Codespace no encontrado",
-                f"No se encontró el Codespace `{codespace}`.\n\nUsa `/vincular` sin parámetros para ver tu lista.",
-            )
-            await interaction.followup.send(
-                embed=embed, ephemeral=True
-            )
-            return
-        
-        vinculaciones = safe_load(VINCULACIONES_FILE)
-        permisos_previos = vinculaciones.get(user_id, {}).get("permisos", [])
-        historial = vinculaciones.get(user_id, {}).get("historial", [])
-        
-        fecha_actual = datetime.now().isoformat()
-        
-        nueva_entrada = {
-            "codespace": codespace,
-            "fecha": fecha_actual
-        }
-        
-        historial = [h for h in historial if h.get("codespace") != codespace]
-        historial.insert(0, nueva_entrada)
-        historial = historial[:10]
-
-        vinculaciones[user_id] = {
-            "codespace": codespace,
-            "permisos": permisos_previos,
-            "historial": historial,
-            "ultima_vinculacion": fecha_actual
-        }
-        safe_save(VINCULACIONES_FILE, vinculaciones)
-
-        codespace_url = f"https://{codespace}-8080.app.github.dev"
-        
-        sesiones[user_id]["codespace"] = codespace
-        sesiones[user_id]["codespace_url"] = codespace_url
+        user_id = str(interaction.user.id)
+        db = get_db()
         
         try:
-            import aiohttp
-            
-            tunnel_check_url = f"{codespace_url}/get_url"
+            headers = {
+                "Authorization": f"Bearer {github_token}",
+                "Accept": "application/vnd.github+json"
+            }
             
             async with aiohttp.ClientSession() as session:
-                async with session.get(tunnel_check_url, timeout=aiohttp.ClientTimeout(total=5)) as resp:
+                async with session.get("https://api.github.com/user", headers=headers) as resp:
+                    if resp.status != 200:
+                        await interaction.followup.send(
+                            "❌ Token inválido o sin permisos suficientes.\n"
+                            "Asegúrate de que tenga los scopes: `repo`, `codespace`, `user`",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    user_data = await resp.json()
+                    github_username = user_data["login"]
+                    github_id = str(user_data["id"])
+                
+                async with session.get("https://api.github.com/user/codespaces", headers=headers) as resp:
+                    if resp.status != 200:
+                        await interaction.followup.send(
+                            "❌ No se pudieron obtener tus Codespaces.\n"
+                            "Verifica que el token tenga el scope `codespace`.",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    codespaces_data = await resp.json()
+                    codespaces = codespaces_data.get("codespaces", [])
+                    
+                    if not codespaces:
+                        await interaction.followup.send(
+                            "⚠️ No tienes Codespaces creados.\n"
+                            "Crea uno primero en GitHub y vuelve a intentar.",
+                            ephemeral=True
+                        )
+                        return
+                    
+                    codespace = codespaces[0]
+                    codespace_name = codespace["name"]
+                    repo_full_name = codespace["repository"]["full_name"]
+                    repo_name = codespace["repository"]["name"]
+            
+            print(f"✅ Vinculando usuario {user_id} ({github_username})")
+            
+            db.save_sesion(user_id, {
+                "github_username": github_username,
+                "github_id": github_id,
+                "token": github_token,
+                "codespace": codespace_name,
+                "repo_name": repo_name,
+                "repo_full_name": repo_full_name,
+                "vinculado_at": datetime.now().isoformat()
+            })
+            
+            db.save_vinculacion(user_id, github_username)
+            
+            embed_config = discord.Embed(
+                title="⚙️ Configurando Codespace Automáticamente...",
+                description=(
+                    f"**GitHub:** `{github_username}`\n"
+                    f"**Repositorio:** `{repo_full_name}`\n"
+                    f"**Codespace:** `{codespace_name}`\n\n"
+                    "Creando archivos de configuración..."
+                ),
+                color=discord.Color.yellow()
+            )
+            msg = await interaction.followup.send(embed=embed_config, ephemeral=True)
+            
+            needs_devcontainer = await self._check_needs_devcontainer(github_token, repo_full_name)
+            
+            devcontainer_result = "exists"
+            if needs_devcontainer:
+                devcontainer_result = await self._create_devcontainer(github_token, repo_full_name, user_id)
+            
+            startup_result = await self._create_startup(github_token, repo_full_name, user_id)
+            
+            sesion = db.get_sesion(user_id)
+            sesion["auto_configured"] = True
+            sesion["devcontainer_created"] = (devcontainer_result == True)
+            sesion["startup_created"] = (startup_result == True)
+            sesion["configured_at"] = datetime.now().isoformat()
+            db.save_sesion(user_id, sesion)
+            
+            print(f"✅ Usuario {user_id} configurado completamente")
+            
+            status_devcontainer = "✅ Creado" if devcontainer_result == True else ("ℹ️ Ya existía" if devcontainer_result == "exists" else "⚠️ Error")
+            status_startup = "✅ Creado/Actualizado" if startup_result else "⚠️ Error"
+            
+            embed_done = discord.Embed(
+                title="✅ Configuración Completa",
+                description=(
+                    f"**GitHub:** `{github_username}`\n"
+                    f"**Repositorio:** `{repo_full_name}`\n"
+                    f"**Codespace:** `{codespace_name}`\n\n"
+                ),
+                color=discord.Color.green()
+            )
+            
+            embed_done.add_field(
+                name="📁 Archivos Configurados",
+                value=(
+                    f"{status_devcontainer} `.devcontainer/devcontainer.json`\n"
+                    f"{status_startup} `startup.sh`"
+                ),
+                inline=False
+            )
+            
+            embed_done.add_field(
+                name="🚀 Próximos Pasos",
+                value=(
+                    "**1. Reconstruir Codespace** (solo la primera vez):\n"
+                    f"   → https://github.com/{repo_full_name}\n"
+                    "   → Code → Codespaces → ... → Rebuild Container\n\n"
+                    "**2. O usa `/start`** directamente\n"
+                    "   → El bot iniciará tu Codespace automáticamente\n\n"
+                    "**3. Recibe notificación**\n"
+                    "   → Te enviaré un DM con la IP del tunnel cuando esté listo"
+                ),
+                inline=False
+            )
+            
+            embed_done.set_footer(text="💡 Ahora todo se ejecuta automáticamente al iniciar tu Codespace")
+            
+            await msg.edit(embed=embed_done)
+            
+        except Exception as e:
+            import traceback
+            traceback.print_exc()
+            await interaction.followup.send(f"❌ Error durante la configuración:\n```{e}```\n\nIntenta nuevamente o contacta al administrador.", ephemeral=True)
+    
+    async def _check_needs_devcontainer(self, github_token: str, repo_full_name: str) -> bool:
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github+json"
+        }
+        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(
+                f"https://api.github.com/repos/{repo_full_name}/contents/.devcontainer/devcontainer.json",
+                headers=headers
+            ) as resp:
+                if resp.status == 404:
+                    return True
+                elif resp.status == 200:
+                    data = await resp.json()
+                    content = base64.b64decode(data["content"]).decode()
+                    
+                    try:
+                        config = json.loads(content)
+                        if "postStartCommand" not in config:
+                            print(f"⚠️  devcontainer.json existe pero sin postStartCommand")
+                            return True
+                        print(f"ℹ️  devcontainer.json ya existe y está configurado")
+                        return False
+                    except:
+                        return True
+                else:
+                    return True
+    
+    async def _create_devcontainer(self, github_token: str, repo_full_name: str, discord_user_id: str) -> bool:
+        print(f"📝 Creando devcontainer.json para {repo_full_name}")
+        
+        devcontainer_config = {
+            "name": "Minecraft Server Codespace (Auto-configured by Doce-Bt)",
+            "image": "mcr.microsoft.com/devcontainers/base:ubuntu",
+            "postStartCommand": "bash ${containerWorkspaceFolder}/startup.sh",
+            "forwardPorts": [25565, 24454, 8080],
+            "portsAttributes": {
+                "25565": {"label": "Minecraft Server", "onAutoForward": "notify"},
+                "24454": {"label": "SimpleVoiceChat (UDP)", "onAutoForward": "silent"},
+                "8080": {"label": "Web Server + Cloudflare Tunnel", "onAutoForward": "silent"}
+            },
+            "containerEnv": {
+                "DISCORD_USER_ID": discord_user_id,
+                "BOT_WEBHOOK_URL": f"{RENDER_EXTERNAL_URL}/webhook/tunnel_notify",
+                "MINECRAFT_PORT": "25565",
+                "VOICECHAT_PORT": "24454",
+                "AUTO_START": "true"
+            },
+            "features": {
+                "ghcr.io/devcontainers/features/python:1": {"version": "3.11"},
+                "ghcr.io/devcontainers/features/github-cli:1": {}
+            },
+            "customizations": {
+                "vscode": {
+                    "extensions": ["ms-python.python", "ms-python.vscode-pylance"],
+                    "settings": {
+                        "python.defaultInterpreterPath": "/usr/local/bin/python",
+                        "terminal.integrated.defaultProfile.linux": "bash"
+                    }
+                }
+            },
+            "postCreateCommand": "pip install -r requirements.txt || true"
+        }
+        
+        content_str = json.dumps(devcontainer_config, indent=2)
+        content_base64 = base64.b64encode(content_str.encode()).decode()
+        
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github+json"
+        }
+        
+        try:
+            async with aiohttp.ClientSession() as session:
+                existing_sha = None
+                async with session.get(
+                    f"https://api.github.com/repos/{repo_full_name}/contents/.devcontainer/devcontainer.json",
+                    headers=headers
+                ) as resp:
                     if resp.status == 200:
                         data = await resp.json()
-                        tunnel_url = data.get('tunnel_url')
-                        
-                        if tunnel_url:
-                            sesiones[user_id]["tunnel_url"] = tunnel_url
-                            sesiones[user_id]["tunnel_actualizado"] = datetime.now().isoformat()
-                            print(f"✅ URL de Cloudflare Tunnel detectada: {tunnel_url}")
+                        existing_sha = data.get("sha")
+                        print(f"ℹ️  Actualizando devcontainer.json existente")
+                
+                payload = {
+                    "message": "🤖 Auto-configure Codespace by Doce-Bt",
+                    "content": content_base64,
+                    "branch": "main"
+                }
+                
+                if existing_sha:
+                    payload["sha"] = existing_sha
+                
+                async with session.put(
+                    f"https://api.github.com/repos/{repo_full_name}/contents/.devcontainer/devcontainer.json",
+                    headers=headers,
+                    json=payload
+                ) as resp:
+                    if resp.status in [200, 201]:
+                        print(f"✅ devcontainer.json creado/actualizado")
+                        return True
+                    else:
+                        error_data = await resp.json()
+                        print(f"❌ Error creando devcontainer.json: {error_data}")
+                        return False
         except Exception as e:
-            print(f"⚠️ No se pudo obtener URL del túnel: {e}")
+            print(f"❌ Excepción creando devcontainer.json: {e}")
+            return False
+    
+    async def _create_startup(self, github_token: str, repo_full_name: str, discord_user_id: str) -> bool:
+        print(f"📝 Creando startup.sh para {repo_full_name}")
         
-        safe_save(SESIONES_FILE, sesiones)
+        startup_script = f'''#!/bin/bash
+set -e
 
-        dt = datetime.now()
-        fecha_legible = dt.strftime("%d/%m/%Y %H:%M")
+LOG_FILE="/tmp/codespace_startup.log"
+DISCORD_USER_ID="{discord_user_id}"
+BOT_WEBHOOK_URL="${{BOT_WEBHOOK_URL:-{RENDER_EXTERNAL_URL}/webhook/tunnel_notify}}"
 
-        tunnel_info = ""
-        if sesiones[user_id].get("tunnel_url"):
-            tunnel_info = f"\n🌐 **Cloudflare Tunnel:** Detectado"
+echo "🚀 [$(date)] Iniciando scripts de startup..." | tee -a "$LOG_FILE"
 
-        embed = crear_embed_exito(
-            "✅ Codespace Vinculado",
-            (
-                f"**Codespace:** `{codespace}`\n"
-                f"**Estado:** {codespace_encontrado['state']}\n"
-                f"**Fecha:** {fecha_legible}{tunnel_info}\n\n"
-                "Ahora puedes usar los comandos de control desde Discord.\n"
-                "El sistema de eventos está monitoreando tu Codespace."
-            ),
-            footer="d0ce3|tools v2"
-        )
-        await interaction.followup.send(
-            embed=embed, ephemeral=True
-        )
+GREEN='\\033[0;32m'
+YELLOW='\\033[1;33m'
+RED='\\033[0;31m'
+BLUE='\\033[0;34m'
+NC='\\033[0m'
 
-    @app_commands.command(
-        name="actualizar_tunnel",
-        description="Actualiza la URL del Cloudflare Tunnel de tu Codespace"
-    )
-    async def actualizar_tunnel(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
-        sesiones = safe_load(SESIONES_FILE)
+WORKSPACE_ROOT="${{CODESPACE_VSCODE_FOLDER:-/workspaces/$(basename $(pwd))}}"
+cd "$WORKSPACE_ROOT" || {{
+    echo -e "${{RED}}❌ No se pudo acceder al workspace: $WORKSPACE_ROOT${{NC}}" | tee -a "$LOG_FILE"
+    exit 1
+}}
 
-        if user_id not in sesiones:
-            embed = crear_embed_error(
-                "❌ Sin Codespace",
-                "No tienes un Codespace vinculado.\n\nUsa `/vincular` primero."
-            )
-            await interaction.response.send_message(embed=embed, ephemeral=True)
-            return
+echo -e "${{BLUE}}📂 Workspace: $WORKSPACE_ROOT${{NC}}" | tee -a "$LOG_FILE"
 
-        await interaction.response.defer(ephemeral=True)
+if [ -f requirements.txt ]; then
+    echo -e "${{YELLOW}}📦 Instalando dependencias de Python...${{NC}}" | tee -a "$LOG_FILE"
+    pip install --quiet -r requirements.txt > /tmp/pip_install.log 2>&1 && \\
+        echo -e "${{GREEN}}✅ Dependencias instaladas${{NC}}" | tee -a "$LOG_FILE" || \\
+        echo -e "${{YELLOW}}⚠️  Algunas dependencias fallaron${{NC}}" | tee -a "$LOG_FILE"
+fi
 
-        codespace_url = sesiones[user_id].get("codespace_url")
+if [ -f web_server.py ]; then
+    echo -e "${{YELLOW}}🌐 Iniciando Web Server con Cloudflare Tunnel...${{NC}}" | tee -a "$LOG_FILE"
+    
+    nohup python3 web_server.py > /tmp/web_server.log 2>&1 &
+    WEB_PID=$!
+    echo -e "${{GREEN}}✅ Web server iniciado (PID: $WEB_PID)${{NC}}" | tee -a "$LOG_FILE"
+    
+    echo -e "${{YELLOW}}⏳ Esperando a que Cloudflare Tunnel inicie (45s)...${{NC}}" | tee -a "$LOG_FILE"
+    sleep 45
+    
+    TUNNEL_URL=""
+    
+    if [ -f /tmp/cloudflared.log ]; then
+        TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\\\\.trycloudflare\\\\.com' /tmp/cloudflared.log | tail -1)
+        if [ -n "$TUNNEL_URL" ]; then
+            echo -e "${{GREEN}}✅ Tunnel detectado desde logs: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
+        fi
+    fi
+    
+    if [ -z "$TUNNEL_URL" ]; then
+        echo -e "${{YELLOW}}🔍 Consultando endpoint local...${{NC}}" | tee -a "$LOG_FILE"
+        TUNNEL_RESPONSE=$(curl -s http://localhost:8080/get_url 2>/dev/null || echo "{{}}")
+        TUNNEL_URL=$(echo "$TUNNEL_RESPONSE" | grep -oP '"tunnel_url"\\\\s*:\\\\s*"\\\\K[^"]+' || echo "")
         
-        if not codespace_url:
-            embed = crear_embed_error(
-                "❌ Configuración Incompleta",
-                "No se encontró la URL del Codespace."
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
-            return
+        if [ -n "$TUNNEL_URL" ]; then
+            echo -e "${{GREEN}}✅ Tunnel detectado desde API: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
+        fi
+    fi
+    
+    if [ -z "$TUNNEL_URL" ]; then
+        echo -e "${{YELLOW}}⏳ Reintentando detección en 15s...${{NC}}" | tee -a "$LOG_FILE"
+        sleep 15
+        
+        TUNNEL_URL=$(grep -oP 'https://[a-z0-9-]+\\\\.trycloudflare\\\\.com' /tmp/cloudflared.log | tail -1)
+        
+        if [ -z "$TUNNEL_URL" ]; then
+            TUNNEL_RESPONSE=$(curl -s http://localhost:8080/get_url 2>/dev/null || echo "{{}}")
+            TUNNEL_URL=$(echo "$TUNNEL_RESPONSE" | grep -oP '"tunnel_url"\\\\s*:\\\\s*"\\\\K[^"]+' || echo "")
+        fi
+    fi
+    
+    if [ -n "$TUNNEL_URL" ]; then
+        echo -e "${{GREEN}}✅ Cloudflare Tunnel detectado: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
+        
+        echo "$TUNNEL_URL" > /tmp/tunnel_url.txt
+        
+        echo -e "${{YELLOW}}📤 Notificando al bot de Discord...${{NC}}" | tee -a "$LOG_FILE"
+        
+        CODESPACE_NAME="${{CODESPACE_NAME:-unknown}}"
+        TIMESTAMP=$(date -u +"%Y-%m-%dT%H:%M:%S")
+        
+        JSON_PAYLOAD=$(cat <<EOF
+{{
+  "user_id": "$DISCORD_USER_ID",
+  "codespace_name": "$CODESPACE_NAME",
+  "tunnel_url": "$TUNNEL_URL",
+  "tunnel_type": "cloudflare",
+  "timestamp": "$TIMESTAMP",
+  "auto_started": true
+}}
+EOF
+)
+        
+        RESPONSE=$(curl -s -X POST "$BOT_WEBHOOK_URL" \\\\
+          -H "Content-Type: application/json" \\\\
+          -d "$JSON_PAYLOAD" \\\\
+          -w "\\\\n%{{http_code}}")
+        
+        HTTP_CODE=$(echo "$RESPONSE" | tail -1)
+        
+        if [ "$HTTP_CODE" = "200" ]; then
+            echo -e "${{GREEN}}✅ Bot notificado exitosamente${{NC}}" | tee -a "$LOG_FILE"
+        else
+            echo -e "${{YELLOW}}⚠️  No se pudo notificar al bot (HTTP $HTTP_CODE)${{NC}}" | tee -a "$LOG_FILE"
+        fi
+    else
+        echo -e "${{RED}}❌ No se pudo detectar URL del Cloudflare Tunnel${{NC}}" | tee -a "$LOG_FILE"
+        echo -e "${{YELLOW}}Últimas 30 líneas de cloudflared.log:${{NC}}" | tee -a "$LOG_FILE"
+        tail -30 /tmp/cloudflared.log 2>/dev/null | tee -a "$LOG_FILE" || echo "  (log no encontrado)" | tee -a "$LOG_FILE"
+    fi
+    
+elif [ -f auto_webserver_setup.sh ]; then
+    echo -e "${{YELLOW}}🌐 Ejecutando auto_webserver_setup.sh...${{NC}}" | tee -a "$LOG_FILE"
+    nohup bash auto_webserver_setup.sh > /tmp/web_server.log 2>&1 &
+    echo -e "${{GREEN}}✅ Script de webserver iniciado${{NC}}" | tee -a "$LOG_FILE"
+else
+    echo -e "${{YELLOW}}⚠️  web_server.py no encontrado${{NC}}" | tee -a "$LOG_FILE"
+fi
 
+if [ -f start_server.sh ]; then
+    echo -e "${{YELLOW}}🎮 Iniciando servidor de Minecraft...${{NC}}" | tee -a "$LOG_FILE"
+    nohup bash start_server.sh > /tmp/minecraft_server.log 2>&1 &
+    MC_PID=$!
+    echo -e "${{GREEN}}✅ Minecraft iniciado (PID: $MC_PID)${{NC}}" | tee -a "$LOG_FILE"
+elif [ -f run.sh ]; then
+    echo -e "${{YELLOW}}🎮 Iniciando servidor con run.sh...${{NC}}" | tee -a "$LOG_FILE"
+    nohup bash run.sh > /tmp/minecraft_server.log 2>&1 &
+    MC_PID=$!
+    echo -e "${{GREEN}}✅ Servidor iniciado (PID: $MC_PID)${{NC}}" | tee -a "$LOG_FILE"
+fi
+
+if [ -f main.py ] && [ -d "d0ce3-Addons" ] || grep -q "d0ce3-Addons" main.py 2>/dev/null; then
+    echo -e "${{YELLOW}}🔧 Iniciando d0ce3-Addons...${{NC}}" | tee -a "$LOG_FILE"
+    nohup python3 main.py > /tmp/addons.log 2>&1 &
+    ADDONS_PID=$!
+    echo -e "${{GREEN}}✅ d0ce3-Addons iniciado (PID: $ADDONS_PID)${{NC}}" | tee -a "$LOG_FILE"
+fi
+
+echo "" | tee -a "$LOG_FILE"
+echo -e "${{YELLOW}}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${{NC}}" | tee -a "$LOG_FILE"
+echo -e "${{GREEN}}   ✨ Startup completado${{NC}}" | tee -a "$LOG_FILE"
+echo -e "${{YELLOW}}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${{NC}}" | tee -a "$LOG_FILE"
+echo "" | tee -a "$LOG_FILE"
+echo -e "${{GREEN}}📊 Procesos activos:${{NC}}" | tee -a "$LOG_FILE"
+ps aux | grep -E "python3|cloudflared|java" | grep -v grep | tee -a "$LOG_FILE" || echo "  (ninguno detectado)" | tee -a "$LOG_FILE"
+echo "" | tee -a "$LOG_FILE"
+
+if [ -n "$TUNNEL_URL" ]; then
+    echo -e "${{GREEN}}🌐 Tunnel URL: $TUNNEL_URL${{NC}}" | tee -a "$LOG_FILE"
+fi
+
+echo -e "${{YELLOW}}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${{NC}}" | tee -a "$LOG_FILE"
+echo "" | tee -a "$LOG_FILE"
+
+echo "✅ [$(date)] Startup script finalizado" | tee -a "$LOG_FILE"
+'''
+        
+        content_base64 = base64.b64encode(startup_script.encode()).decode()
+        
+        headers = {
+            "Authorization": f"Bearer {github_token}",
+            "Accept": "application/vnd.github+json"
+        }
+        
         try:
-            import aiohttp
-            
-            tunnel_check_url = f"{codespace_url}/get_url"
-            
             async with aiohttp.ClientSession() as session:
-                async with session.get(tunnel_check_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                    if resp.status != 200:
-                        embed = crear_embed_error(
-                            "❌ Servidor Web No Activo",
-                            "El servidor web no está respondiendo.\n\nAsegúrate de que tu Codespace esté ejecutándose."
-                        )
-                        await interaction.followup.send(embed=embed, ephemeral=True)
-                        return
-                    
-                    data = await resp.json()
-                    tunnel_url = data.get('tunnel_url')
-                    
-                    if not tunnel_url:
-                        embed = crear_embed_warning(
-                            "⚠️ Túnel No Disponible",
-                            (
-                                "El Cloudflare Tunnel no está activo.\n\n"
-                                "Verifica que auto_webserver_setup esté ejecutándose con Cloudflare activado."
-                            )
-                        )
-                        await interaction.followup.send(embed=embed, ephemeral=True)
-                        return
-                    
-                    sesiones[user_id]["tunnel_url"] = tunnel_url
-                    sesiones[user_id]["tunnel_actualizado"] = datetime.now().isoformat()
-                    safe_save(SESIONES_FILE, sesiones)
-                    
-                    embed = crear_embed_exito(
-                        "✅ Túnel Actualizado",
-                        (
-                            f"**URL del Túnel:**\n`{tunnel_url}`\n\n"
-                            "Los comandos ahora usarán esta URL para comunicarse con tu Codespace."
-                        ),
-                        footer="La URL cambia cada vez que se reinicia el túnel"
-                    )
-                    await interaction.followup.send(embed=embed, ephemeral=True)
-                    
+                existing_sha = None
+                async with session.get(
+                    f"https://api.github.com/repos/{repo_full_name}/contents/startup.sh",
+                    headers=headers
+                ) as resp:
+                    if resp.status == 200:
+                        data = await resp.json()
+                        existing_sha = data.get("sha")
+                        print(f"ℹ️  Actualizando startup.sh existente")
+                
+                payload = {
+                    "message": "🤖 Auto-create startup script by Doce-Bt",
+                    "content": content_base64,
+                    "branch": "main"
+                }
+                
+                if existing_sha:
+                    payload["sha"] = existing_sha
+                
+                async with session.put(
+                    f"https://api.github.com/repos/{repo_full_name}/contents/startup.sh",
+                    headers=headers,
+                    json=payload
+                ) as resp:
+                    if resp.status in [200, 201]:
+                        print(f"✅ startup.sh creado/actualizado")
+                        return True
+                    else:
+                        error_data = await resp.json()
+                        print(f"❌ Error creando startup.sh: {error_data}")
+                        return False
         except Exception as e:
-            embed = crear_embed_error(
-                "❌ Error",
-                f"Error al obtener URL del túnel:\n```{str(e)}```"
-            )
-            await interaction.followup.send(embed=embed, ephemeral=True)
+            print(f"❌ Excepción creando startup.sh: {e}")
+            return False
 
-    @app_commands.command(
-        name="refrescar",
-        description="Verifica el estado de tu token y vinculación",
-    )
-    async def refrescar(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
-        sesiones = safe_load(SESIONES_FILE)
-        vinculaciones = safe_load(VINCULACIONES_FILE)
-
-        if user_id not in sesiones or not sesiones[user_id].get("token"):
-            await interaction.response.send_message(
-                "❌ No tienes token configurado. Usa `/setup` para registrar tu token.",
-                ephemeral=True,
-            )
-            return
-
-        sesion = sesiones[user_id]
-        vinculacion = vinculaciones.get(user_id, {})
-        
-        token = sesion.get("token")
-        valido, resultado = validar_token(token)
-        
-        if not valido:
-            embed = crear_embed_error(
-                "❌ Token Inválido",
-                f"Tu token ya no es válido.\n\n**Error:** {resultado}\n\nUsa `/setup` para actualizar tu token."
-            )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
-            return
-        
-        usuario_github = sesion.get("usuario_github", "Desconocido")
-        codespace_actual = vinculacion.get("codespace", "Ninguno")
-        ultima_vinculacion = vinculacion.get("ultima_vinculacion")
-        tunnel_url = sesion.get("tunnel_url")
-        
-        fecha_vinculacion = "Nunca"
-        if ultima_vinculacion:
-            try:
-                dt = datetime.fromisoformat(ultima_vinculacion)
-                fecha_vinculacion = f"<t:{int(dt.timestamp())}:R>"
-            except:
-                pass
-
-        descripcion = (
-            f"**Usuario GitHub:** `{usuario_github}`\n"
-            f"**Codespace Actual:** `{codespace_actual}`\n"
-            f"**Última Vinculación:** {fecha_vinculacion}\n\n"
-            "✅ Token válido\n"
-            "✅ Sesión activa"
-        )
-        
-        if tunnel_url:
-            descripcion += f"\n🌐 Cloudflare Tunnel activo"
-
-        embed = crear_embed_exito(
-            "✅ Estado de la Sesión",
-            descripcion,
-            footer="d0ce3|tools v2"
-        )
-        
-        await interaction.response.send_message(
-            embed=embed,
-            ephemeral=True,
-        )
-
-    @app_commands.command(
-        name="historial",
-        description="Ver historial de Codespaces vinculados",
-    )
-    async def historial(self, interaction: discord.Interaction):
-        user_id = str(interaction.user.id)
-        vinculaciones = safe_load(VINCULACIONES_FILE)
-
-        if user_id not in vinculaciones:
-            embed = crear_embed_error(
-                "❌ Sin Codespaces",
-                "No has vinculado ningún Codespace aún.\n\nUsa `/vincular` para comenzar.",
-            )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
-            return
-
-        data = vinculaciones[user_id]
-        codespace_actual = data.get("codespace", "Ninguno")
-        historial = data.get("historial", [])
-
-        if not historial:
-            embed = crear_embed_info(
-                "📋 Historial de Codespaces",
-                f"**Actual:** `{codespace_actual}`\n\nNo hay historial previo.",
-            )
-            await interaction.response.send_message(
-                embed=embed, ephemeral=True
-            )
-            return
-
-        lista = []
-        for i, entrada in enumerate(historial[:10], 1):
-            nombre = entrada.get("codespace", "Desconocido")
-            fecha = entrada.get("fecha", "")
-            
-            try:
-                dt = datetime.fromisoformat(fecha)
-                fecha_str = dt.strftime("%d/%m/%Y %H:%M")
-            except:
-                fecha_str = "Fecha desconocida"
-            
-            marca = "⭐" if nombre == codespace_actual else f"{i}."
-            lista.append(f"{marca} `{nombre}` - {fecha_str}")
-
-        descripcion = "\n".join(lista)
-        descripcion += "\n\n⭐ = Codespace actual"
-
-        embed = crear_embed_info(
-            "📋 Historial de Codespaces",
-            descripcion,
-            footer=f"Total: {len(historial)} codespaces vinculados"
-        )
-        
-        await interaction.response.send_message(
-            embed=embed, ephemeral=True
-        )
-
-
-async def setup(bot: commands.Bot):
+async def setup(bot):
     await bot.add_cog(SetupCog(bot))
